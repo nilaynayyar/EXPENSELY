@@ -126,7 +126,7 @@ export default function ScannerPage() {
   const [file, setFile] = useState<File | null>(null);
   const [qrUrl, setQrUrl] = useState<string>("");
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [timeLeft, setTimeLeft] = useState<number>(30); // TEMP TEST: 30 s (restore to 900 after verification)
+  const [timeLeft, setTimeLeft] = useState<number>(900); // 15 minutes
 
   // Initialize scan session
   useEffect(() => {
@@ -181,31 +181,22 @@ export default function ScannerPage() {
   }, []);
 
   // --- QR generation -------------------------------------------------------
+  // Use window.location.origin — always matches the host the browser connected
+  // to, which is exactly what the mobile device needs for LAN access.
   useEffect(() => {
     if (!sessionId) return;
-    fetch("/api/network-info")
-      .then((res) => res.json())
-      .then(({ ip }) => {
-        const port = window.location.port || "3000";
-        const protocol = window.location.protocol;
-        const uploadUrl = `${protocol}//${ip}:${port}/scan-upload?id=${sessionId}`;
-        setQrUrl(
-          `https://api.qrserver.com/v1/create-qr-code/?size=250x250&ecc=H&margin=2&data=${encodeURIComponent(uploadUrl)}`
-        );
-      })
-      .catch(() => {
-        const uploadUrl = `${window.location.origin}/scan-upload?id=${sessionId}`;
-        setQrUrl(
-          `https://api.qrserver.com/v1/create-qr-code/?size=250x250&ecc=H&margin=2&data=${encodeURIComponent(uploadUrl)}`
-        );
-      });
+    const uploadUrl = `${window.location.origin}/scan-upload?id=${sessionId}`;
+    console.log("[scanner] QR URL:", uploadUrl);
+    setQrUrl(
+      `https://api.qrserver.com/v1/create-qr-code/?size=250x250&ecc=H&margin=2&data=${encodeURIComponent(uploadUrl)}`
+    );
   }, [sessionId]);
 
   // --- QR countdown + auto-refresh -----------------------------------------
   useEffect(() => {
     if (!sessionId) return;
 
-    setTimeLeft(30); // TEMP TEST: 30 s (restore to 900 after verification)
+    setTimeLeft(900); // 15 minutes
 
     const tick = setInterval(() => {
       setTimeLeft((prev) => {
@@ -326,26 +317,51 @@ export default function ScannerPage() {
     if (!sessionId || ocrDone || uploading) return;
 
     const interval = setInterval(async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+
       try {
-        const res = await fetch(`/api/scan-session?id=${sessionId}`);
+        const res = await fetch(`/api/scan-session?id=${sessionId}`, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+
+        clearTimeout(timeout);
+
         if (!res.ok) return;
+
         const data = await res.json();
+
         if (data.status === "uploaded" && data.image) {
           clearInterval(interval);
-          // Decode base64 data URL directly — avoids a redundant fetch round-trip
+
           const dataUrl: string = data.image;
+
           const mimeMatch = dataUrl.match(/^data:([^;]+);base64,/);
-          const mimeType = mimeMatch ? mimeMatch[1] : (data.fileType || "image/jpeg");
+          const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
+
           const base64 = dataUrl.replace(/^data:[^;]+;base64,/, "");
           const binary = atob(base64);
+
           const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+
           const blob = new Blob([bytes], { type: mimeType });
-          const file = new File([blob], data.fileName || "receipt.jpg", { type: mimeType });
+
+          const file = new File(
+            [blob],
+            data.fileName || "receipt.jpg",
+            { type: mimeType }
+          );
+
           processReceipt(file);
         }
       } catch (err) {
-        console.error("Error polling scan session:", err);
+        console.error("Polling failed or timed out:", err);
+      } finally {
+        clearTimeout(timeout);
       }
     }, 2000);
 

@@ -9,6 +9,9 @@ interface ScanSession {
   fileType: string | null;
 }
 
+// Session TTL: 15 minutes (must match client-side countdown)
+const SESSION_TTL = 15 * 60 * 1000; // 900 000 ms
+
 // In Next.js, API routes can run concurrently. A global variable will hold the map.
 const globalAny = global as any;
 if (!globalAny.scanSessions) {
@@ -16,12 +19,11 @@ if (!globalAny.scanSessions) {
 }
 const sessions = globalAny.scanSessions as Map<string, ScanSession>;
 
-// Helper to clean up sessions older than 15 minutes
+// Helper to clean up sessions older than SESSION_TTL
 function cleanupOldSessions() {
   const now = Date.now();
-  const fifteenMinutes = 15 * 60 * 1000;
   for (const [id, session] of sessions.entries()) {
-    if (now - session.createdAt > fifteenMinutes) {
+    if (now - session.createdAt > SESSION_TTL) {
       sessions.delete(id);
     }
   }

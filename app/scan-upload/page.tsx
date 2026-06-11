@@ -1,11 +1,15 @@
 "use client";
 
 import { useState, useEffect, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UploadForm — mounted inside <Suspense> so Next.js streaming SSR is satisfied.
+// sessionId is derived ONCE from window.location.search on mount.
+// No useSearchParams — eliminates hydration race conditions on mobile.
+// ─────────────────────────────────────────────────────────────────────────────
 function UploadForm() {
-  const searchParams = useSearchParams();
-  const sessionId = searchParams.get("id");
+  // Single source of truth for the session identifier.
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -14,57 +18,106 @@ function UploadForm() {
   const [error, setError] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string>("");
 
-  // "checking" while the server probe is in-flight;
-  // "valid"    if the session exists and is not expired;
-  // "expired"  if the server returns 404 or status:"expired".
+  // "checking" → API call in-flight
+  // "valid"    → session confirmed by server, show upload UI
+  // "expired"  → session missing / timed out / server error
   const [sessionStatus, setSessionStatus] = useState<"checking" | "valid" | "expired">("checking");
 
-  // Validate session against the server before rendering the upload UI.
+  // ── Step 1: extract sessionId from URL exactly once on mount ──────────────
   useEffect(() => {
-    console.log("[AUDIT CLIENT] useEffect mounted/triggered. sessionId:", sessionId);
-    if (!sessionId) {
-      console.log("[AUDIT CLIENT] No sessionId found in URL query params. Setting expired.");
+    const id = new URLSearchParams(window.location.search).get("id");
+    console.log("[scan-upload] mount — id from URL:", id);
+    if (!id) {
       setSessionStatus("expired");
       return;
     }
-    console.log("[AUDIT CLIENT] Fetching: /api/scan-session?id=" + sessionId);
-    fetch(`/api/scan-session?id=${sessionId}`)
-      .then((res) => {
-        console.log("[AUDIT CLIENT] Fetch responded. status:", res.status, "ok:", res.ok);
-        if (!res.ok) {
-          console.log("[AUDIT CLIENT] Response not ok. Setting expired.");
-          setSessionStatus("expired");
-          return;
-        }
-        return res.json();
-      })
-      .then((data) => {
-        console.log("[AUDIT CLIENT] Parsed JSON data:", data);
-        if (!data) {
-          console.log("[AUDIT CLIENT] Early return: no data parsed.");
-          return;
-        }
-        if (data.status === "expired" || data.error) {
-          console.log("[AUDIT CLIENT] Data indicates expired status or error. Setting expired.");
-          setSessionStatus("expired");
-        } else {
-          console.log("[AUDIT CLIENT] Session is valid. Setting valid.");
-          setSessionStatus("valid");
-        }
-      })
-      .catch((err) => {
-        console.error("[AUDIT CLIENT] Fetch failed with exception:", err);
-        setSessionStatus("expired");
-      });
-  }, [sessionId]);
+    setSessionId(id); // triggers Step 2
+  }, []); // intentionally empty — runs once
 
+  // ── Step 2: validate session against the API once sessionId is available ──
+  useEffect(() => {
+    if (!sessionId) return; // wait for Step 1
+
+    setSessionStatus("checking");
+
+    // ONE AbortController, ONE timeout — no Promise.race, no layered timers.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.warn("[scan-upload] Validation timed out (10 s) — aborting fetch.");
+      controller.abort();
+    }, 10000);
+
+    // Mounted guard prevents state updates after unmount (React strict-mode safety).
+    let mounted = true;
+
+    (async () => {
+      // Fail-safe default: if anything goes wrong → show expired UI.
+      let nextStatus: "valid" | "expired" = "expired";
+
+      const url = `/api/scan-session?id=${sessionId}`;
+      console.log("[scan-upload] Fetching:", url);
+
+      try {
+        const res = await fetch(url, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+
+        console.log("[scan-upload] Response status:", res.status, "ok:", res.ok);
+
+        if (!res.ok) {
+          // 404 = session not found / expired; any non-2xx = expired
+          nextStatus = "expired";
+        } else {
+          const raw = await res.text();
+          console.log("[scan-upload] Response body:", raw);
+
+          try {
+            const data = JSON.parse(raw) as Record<string, unknown>;
+            if (data.status === "pending" || data.status === "uploaded") {
+              nextStatus = "valid";
+            } else {
+              console.warn("[scan-upload] Unexpected data.status:", data.status);
+              nextStatus = "expired";
+            }
+          } catch (jsonErr) {
+            console.error("[scan-upload] JSON parse error:", jsonErr, "| raw:", raw);
+            nextStatus = "expired";
+          }
+        }
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") {
+          console.warn("[scan-upload] Fetch aborted (timeout or unmount).");
+        } else {
+          console.error("[scan-upload] Fetch threw:", err);
+        }
+        nextStatus = "expired";
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      // Unconditional — every code path above has set nextStatus.
+      if (mounted) {
+        console.log("[scan-upload] → setSessionStatus:", nextStatus);
+        setSessionStatus(nextStatus);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [sessionId]); // runs once after Step 1 sets sessionId
+
+  // ── Revoke blob URL on cleanup ────────────────────────────────────────────
   useEffect(() => {
     return () => {
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
   }, [previewUrl]);
 
-  // --- Render gate: validate before showing any upload UI -----------------
+  // ── Render gate ───────────────────────────────────────────────────────────
   if (sessionStatus === "checking") {
     return (
       <div className="glass-panel p-8 rounded-2xl max-w-md w-full text-center">
@@ -85,30 +138,31 @@ function UploadForm() {
           This QR code is no longer valid.
         </p>
         <p className="text-body-sm text-on-surface-variant">
-          Please return to your computer and scan a new QR code.
+          Please return to your computer and generate a new QR code.
         </p>
       </div>
     );
   }
 
-  // sessionStatus === "valid" — original guard below is now unreachable for
-  // missing IDs (handled above) but kept for type safety.
-  if (!sessionId) return null;
+  // ── sessionStatus === "valid" ─────────────────────────────────────────────
+  // sessionId is guaranteed non-null here (Step 1 set it before Step 2 ran).
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const selected = e.target.files[0];
       setFile(selected);
       setError("");
-
-      const url = URL.createObjectURL(selected);
-      setPreviewUrl(url);
+      setPreviewUrl(URL.createObjectURL(selected));
     }
   };
 
   const handleUpload = async () => {
     if (!file) {
       setError("Please select or capture a receipt image first.");
+      return;
+    }
+    if (!sessionId) {
+      setError("Session ID is missing. Please rescan the QR code.");
       return;
     }
 
@@ -121,7 +175,6 @@ function UploadForm() {
       formData.append("id", sessionId);
       formData.append("file", file);
 
-      // Smooth progress animation
       const interval = setInterval(() => {
         setUploadProgress((p) => (p < 80 ? p + 15 : p));
       }, 150);
@@ -140,8 +193,9 @@ function UploadForm() {
       }
 
       setSuccess(true);
-    } catch (err: any) {
-      setError(err.message || "An unexpected error occurred during upload.");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "An unexpected error occurred.";
+      setError(msg);
       setUploadProgress(0);
     } finally {
       setUploading(false);
@@ -187,7 +241,6 @@ function UploadForm() {
       )}
 
       <div className="space-y-6">
-        {/* Upload Target Area */}
         <div className="flex flex-col items-center justify-center">
           {previewUrl ? (
             <div className="relative rounded-xl overflow-hidden border border-outline-variant bg-surface-container-low max-h-[250px] w-full flex items-center justify-center">
@@ -225,7 +278,6 @@ function UploadForm() {
           )}
         </div>
 
-        {/* Action Button */}
         {file && (
           <button
             onClick={handleUpload}
@@ -253,12 +305,14 @@ function UploadForm() {
 export default function ScanUploadPage() {
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4">
-      <Suspense fallback={
-        <div className="glass-panel p-8 rounded-2xl max-w-md w-full text-center">
-          <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-body-md text-on-surface-variant">Loading scan session…</p>
-        </div>
-      }>
+      <Suspense
+        fallback={
+          <div className="glass-panel p-8 rounded-2xl max-w-md w-full text-center">
+            <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+            <p className="text-body-md text-on-surface-variant">Loading scan session…</p>
+          </div>
+        }
+      >
         <UploadForm />
       </Suspense>
     </div>
