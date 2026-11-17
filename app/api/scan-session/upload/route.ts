@@ -130,7 +130,22 @@ export async function POST(req: NextRequest) {
         const rawAmount = formData.get("amount") as string;
         const parsedAmount = rawAmount ? parseFloat(rawAmount) : 0;
         const expenseDate = (formData.get("date") as string) || new Date().toISOString().split("T")[0];
-        const categoryId = (formData.get("categoryId") as string) || null;
+        let resolvedCategoryId = (formData.get("categoryId") as string) || null;
+        const categoryNameInput = (formData.get("category") as string)?.trim();
+        if (!resolvedCategoryId && categoryNameInput) {
+          try {
+            const { data: matchedCat } = await admin
+              .from("categories")
+              .select("id")
+              .ilike("name", categoryNameInput)
+              .maybeSingle();
+            if (matchedCat?.id) {
+              resolvedCategoryId = matchedCat.id;
+            }
+          } catch {
+            // ignore
+          }
+        }
 
         const { data: newExpense, error: expErr } = await admin
           .from("expenses")
@@ -140,7 +155,7 @@ export async function POST(req: NextRequest) {
               store: storeName,
               amount: isNaN(parsedAmount) ? 0 : parsedAmount,
               date: expenseDate,
-              category_id: categoryId || null,
+              category_id: resolvedCategoryId || null,
               status: "Pending",
               receipt_url: imageUrl.startsWith("data:") ? null : imageUrl,
             },

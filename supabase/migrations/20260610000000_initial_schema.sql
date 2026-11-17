@@ -1,5 +1,5 @@
 -- Create categories table
-create table public.categories (
+create table if not exists public.categories (
   id uuid primary key default gen_random_uuid(),
   name text unique not null,
   icon text,
@@ -19,7 +19,7 @@ insert into public.categories (name, icon) values
 on conflict (name) do nothing;
 
 -- Create profiles table
-create table public.profiles (
+create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text not null,
   full_name text,
@@ -30,7 +30,7 @@ create table public.profiles (
 );
 
 -- Create expenses table
-create table public.expenses (
+create table if not exists public.expenses (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
   category_id uuid references public.categories(id) on delete set null,
@@ -43,7 +43,7 @@ create table public.expenses (
 );
 
 -- Create groups table
-create table public.groups (
+create table if not exists public.groups (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   icon text,
@@ -54,7 +54,7 @@ create table public.groups (
 );
 
 -- Create group_members table
-create table public.group_members (
+create table if not exists public.group_members (
   group_id uuid not null references public.groups(id) on delete cascade,
   profile_id uuid not null references public.profiles(id) on delete cascade,
   joined_at timestamp with time zone default now(),
@@ -62,7 +62,7 @@ create table public.group_members (
 );
 
 -- Create group_expenses table
-create table public.group_expenses (
+create table if not exists public.group_expenses (
   id uuid primary key default gen_random_uuid(),
   group_id uuid not null references public.groups(id) on delete cascade,
   payer_id uuid not null references public.profiles(id) on delete cascade,
@@ -74,7 +74,7 @@ create table public.group_expenses (
 );
 
 -- Create budgets table
-create table public.budgets (
+create table if not exists public.budgets (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
   category_id uuid not null references public.categories(id) on delete cascade,
@@ -86,13 +86,13 @@ create table public.budgets (
 );
 
 -- Create indexes for performance optimization
-create index idx_expenses_user_id on public.expenses(user_id);
-create index idx_expenses_category_id on public.expenses(category_id);
-create index idx_group_members_profile_id on public.group_members(profile_id);
-create index idx_group_expenses_group_id on public.group_expenses(group_id);
-create index idx_group_expenses_payer_id on public.group_expenses(payer_id);
-create index idx_budgets_user_id on public.budgets(user_id);
-create index idx_budgets_category_id on public.budgets(category_id);
+create index if not exists idx_expenses_user_id on public.expenses(user_id);
+create index if not exists idx_expenses_category_id on public.expenses(category_id);
+create index if not exists idx_group_members_profile_id on public.group_members(profile_id);
+create index if not exists idx_group_expenses_group_id on public.group_expenses(group_id);
+create index if not exists idx_group_expenses_payer_id on public.group_expenses(payer_id);
+create index if not exists idx_budgets_user_id on public.budgets(user_id);
+create index if not exists idx_budgets_category_id on public.budgets(category_id);
 
 -- Enable Row Level Security (RLS) on all tables
 alter table public.profiles enable row level security;

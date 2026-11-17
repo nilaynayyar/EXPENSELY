@@ -329,6 +329,7 @@ function UploadForm() {
       if (storeName.trim()) formData.append("store", storeName.trim());
       if (amount.trim()) formData.append("amount", amount.trim());
       if (expenseDate) formData.append("date", expenseDate);
+      if (categoryName) formData.append("category", categoryName);
 
       const progressTimer = setInterval(() => {
         setUploadProgress((p) => (p < 85 ? p + 12 : p));
@@ -454,7 +455,7 @@ function UploadForm() {
         type="file"
         accept="image/*"
         capture="environment"
-        style={{ position: "absolute", opacity: 0, width: "1px", height: "1px", pointerEvents: "none" }}
+        style={{ position: "fixed", top: "-9999px", left: "-9999px", opacity: 0, width: "1px", height: "1px", pointerEvents: "none" }}
         onChange={handleFileChange}
       />
       {/* Hidden photo library input (accessible via galleryInputRef) */}
@@ -462,7 +463,7 @@ function UploadForm() {
         ref={galleryInputRef}
         type="file"
         accept="image/png, image/jpeg, image/webp, image/heic"
-        style={{ position: "absolute", opacity: 0, width: "1px", height: "1px", pointerEvents: "none" }}
+        style={{ position: "fixed", top: "-9999px", left: "-9999px", opacity: 0, width: "1px", height: "1px", pointerEvents: "none" }}
         onChange={handleFileChange}
       />
       <canvas ref={canvasRef} className="hidden" />
@@ -597,19 +598,20 @@ function UploadForm() {
           ) : previewUrl ? (
             /* B. CAPTURED PHOTO PREVIEW & CONFIRMATION */
             <div className="space-y-4">
-              <div className="relative rounded-2xl overflow-hidden border border-outline-variant/40 bg-surface-container-low max-h-[280px] w-full flex items-center justify-center shadow-inner">
+              <div className="relative rounded-2xl overflow-hidden border border-outline-variant/40 bg-surface-container-low max-h-[300px] w-full flex items-center justify-center shadow-inner">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={previewUrl} alt="Receipt Preview" className="max-h-[280px] object-contain w-full" />
+                <img src={previewUrl} alt="Receipt Preview" className="max-h-[300px] object-contain w-full" />
                 <button
                   type="button"
                   onClick={() => {
                     setFile(null);
                     setPreviewUrl("");
                   }}
-                  className="absolute top-2.5 right-2.5 bg-black/60 hover:bg-black/80 text-white rounded-full p-2 shadow backdrop-blur-md transition flex items-center justify-center"
+                  className="absolute top-3 right-3 bg-black/75 hover:bg-black text-white px-3 py-1.5 rounded-full text-xs font-semibold shadow backdrop-blur-md transition flex items-center gap-1 cursor-pointer"
                   title="Retake photo"
                 >
-                  <span className="material-symbols-outlined text-base">close</span>
+                  <span className="material-symbols-outlined text-sm">refresh</span>
+                  <span>Retake</span>
                 </button>
               </div>
 
@@ -627,7 +629,7 @@ function UploadForm() {
                       onChange={(e) => setSaveToAccount(e.target.checked)}
                       className="rounded text-primary focus:ring-primary"
                     />
-                    <span>Save to Expenses</span>
+                    <span>Save to My Expenses</span>
                   </label>
                 </div>
 
@@ -692,60 +694,100 @@ function UploadForm() {
                 type="button"
                 onClick={handleUpload}
                 disabled={uploading}
-                className="w-full py-3.5 px-6 bg-primary text-white font-semibold rounded-xl shadow hover:opacity-95 transition flex items-center justify-center gap-2 disabled:opacity-60"
+                className="w-full py-4 px-6 bg-primary text-white font-bold rounded-2xl shadow-lg hover:opacity-95 active:scale-[0.99] transition flex items-center justify-center gap-2.5 disabled:opacity-60 cursor-pointer text-base"
               >
                 {uploading ? (
                   <>
-                    <span className="material-symbols-outlined text-lg animate-spin">sync</span>
-                    <span>Uploading & Saving… {uploadProgress}%</span>
+                    <span className="material-symbols-outlined text-xl animate-spin">sync</span>
+                    <span>Uploading Receipt… {uploadProgress}%</span>
                   </>
                 ) : (
                   <>
-                    <span className="material-symbols-outlined text-lg">cloud_upload</span>
-                    <span>Upload & Save Directly to Account</span>
+                    <span className="material-symbols-outlined text-xl">cloud_upload</span>
+                    <span>Upload Receipt</span>
                   </>
                 )}
               </button>
             </div>
           ) : (
-            /* C. CAMERA LAUNCH OPTIONS */
-            <div className="space-y-3">
-              {/* 1. Primary In-App Live Camera Button */}
+            /* C. CLEAR, UNAMBIGUOUS CAPTURE CHOICES */
+            <div className="space-y-4">
+              {/* Header Title & Subtitle */}
+              <div className="flex flex-col items-center text-center pt-1 pb-2">
+                <div className="w-14 h-14 bg-primary/10 text-primary rounded-2xl flex items-center justify-center mb-2.5 shadow-xs">
+                  <span className="material-symbols-outlined text-[32px]">photo_camera</span>
+                </div>
+                <h2 className="text-title-lg font-bold text-on-surface">Scan Receipt</h2>
+                <p className="text-body-sm text-on-surface-variant max-w-xs mt-0.5">
+                  Capture with your phone camera or select from files
+                </p>
+              </div>
+
+              {/* 1. Primary Action: Take Photo with Phone Camera */}
               <button
                 type="button"
-                onClick={() => startLiveCamera("environment")}
-                disabled={cameraLoading}
-                className="w-full py-4 px-6 rounded-2xl bg-primary text-white flex items-center justify-center gap-3 font-bold shadow-lg hover:opacity-95 active:scale-[0.99] transition"
+                onClick={() => cameraInputRef.current?.click()}
+                className="w-full py-4 px-5 rounded-2xl bg-primary text-white flex items-center justify-between font-bold shadow-md hover:opacity-95 active:scale-[0.99] transition cursor-pointer"
               >
-                {cameraLoading ? (
-                  <span className="material-symbols-outlined text-2xl animate-spin">sync</span>
-                ) : (
-                  <span className="material-symbols-outlined text-2xl">photo_camera</span>
-                )}
-                <span>Capture Receipt with Phone Camera</span>
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-outlined text-2xl text-white">photo_camera</span>
+                  </div>
+                  <div className="text-left">
+                    <div className="text-base font-bold leading-tight">Take Photo with Camera</div>
+                    <div className="text-xs font-normal text-white/80 mt-0.5">Launches phone camera app</div>
+                  </div>
+                </div>
+                <span className="material-symbols-outlined text-white/80">chevron_right</span>
               </button>
 
-              <div className="grid grid-cols-2 gap-3">
-                {/* 2. System Camera App Launcher */}
+              {/* 2. Secondary Options Grid */}
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                {/* Live Viewfinder */}
                 <button
                   type="button"
-                  onClick={() => cameraInputRef.current?.click()}
-                  className="py-3 px-3 rounded-xl border border-outline-variant/40 bg-surface-container-low hover:bg-surface-container transition flex flex-col items-center justify-center text-center gap-1"
+                  onClick={() => startLiveCamera("environment")}
+                  disabled={cameraLoading}
+                  className="p-3.5 rounded-xl border border-outline-variant/50 bg-surface-container-low hover:bg-surface-container-high active:scale-[0.99] transition flex flex-col items-center justify-center text-center gap-1.5 cursor-pointer"
                 >
-                  <span className="material-symbols-outlined text-xl text-primary">camera</span>
-                  <span className="text-xs font-semibold text-on-surface">Camera App</span>
-                  <span className="text-[10px] text-on-surface-variant">Native camera</span>
+                  <div className="w-9 h-9 rounded-lg bg-primary/10 text-primary flex items-center justify-center">
+                    {cameraLoading ? (
+                      <span className="material-symbols-outlined text-xl animate-spin">sync</span>
+                    ) : (
+                      <span className="material-symbols-outlined text-xl">center_focus_strong</span>
+                    )}
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-on-surface block">Live Viewfinder</span>
+                    <span className="text-[10px] text-on-surface-variant block">In-screen framing</span>
+                  </div>
                 </button>
 
-                {/* 3. Photo Library / Files */}
+                {/* Choose from Files / Gallery */}
                 <button
                   type="button"
                   onClick={() => galleryInputRef.current?.click()}
-                  className="py-3 px-3 rounded-xl border border-outline-variant/40 bg-surface-container-low hover:bg-surface-container transition flex flex-col items-center justify-center text-center gap-1"
+                  className="p-3.5 rounded-xl border border-outline-variant/50 bg-surface-container-low hover:bg-surface-container-high active:scale-[0.99] transition flex flex-col items-center justify-center text-center gap-1.5 cursor-pointer"
                 >
-                  <span className="material-symbols-outlined text-xl text-primary">photo_library</span>
-                  <span className="text-xs font-semibold text-on-surface">Photo Library</span>
-                  <span className="text-[10px] text-on-surface-variant">PNG, JPG, WebP</span>
+                  <div className="w-9 h-9 rounded-lg bg-secondary/10 text-secondary flex items-center justify-center">
+                    <span className="material-symbols-outlined text-xl">photo_library</span>
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-on-surface block">Choose from Files</span>
+                    <span className="text-[10px] text-on-surface-variant block">Gallery or files</span>
+                  </div>
+                </button>
+              </div>
+
+              {/* 3. Upload Receipt Standby Button */}
+              <div className="pt-1">
+                <button
+                  type="button"
+                  disabled
+                  className="w-full py-3.5 px-4 rounded-xl bg-surface-container-high/60 text-on-surface-variant/50 font-bold border border-outline-variant/30 flex items-center justify-center gap-2 cursor-not-allowed text-xs"
+                >
+                  <span className="material-symbols-outlined text-base">cloud_upload</span>
+                  <span>Upload Receipt (Take photo or select file first)</span>
                 </button>
               </div>
 
