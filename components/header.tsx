@@ -4,18 +4,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useCallback, useEffect } from "react";
 import { createClient } from "@/utils/supabase/client";
+import { useLanguage } from "./LanguageProvider";
 
-// Unified handler for placeholder actions
-const handleAction = (action: string) => {
-  const messages: Record<string, string> = {
-    notifications: "Notification center is coming soon.",
-    default: "This feature is coming soon.",
-  };
-  alert(messages[action] ?? messages.default);
-};
 // No fallback image URLs per requirements. Single source of truth is profiles.avatar_url.
 export default function Header() {
   const router = useRouter();
+  const { t, language, setLanguage, supportedLanguages } = useLanguage();
   const [searchQuery, setSearchQuery] = useState("");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -24,12 +18,12 @@ export default function Header() {
     // Single fetch on mount — updated via profileUpdated event when settings change
     const fetchProfile = async () => {
       const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
         const { data: profile } = await supabase
           .from('profiles')
           .select('avatar_url')
-          .eq('id', session.user.id)
+          .eq('id', user.id)
           .single();
         if (profile?.avatar_url) {
           setAvatarUrl(profile.avatar_url);
@@ -83,7 +77,7 @@ export default function Header() {
           </span>
           <input
             type="text"
-            placeholder="Search transactions..."
+            placeholder={t("expenses_search_placeholder") || "Search transactions..."}
             className="w-full bg-surface-container-low border-none rounded-lg py-2 pl-10 pr-4 text-body-sm focus:ring-2 focus:ring-primary/20 transition-all focus:outline-none"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -92,6 +86,19 @@ export default function Header() {
         </div>
       </div>
       <div className="flex items-center space-x-4">
+        {/* Language Selector */}
+        <select
+          value={language}
+          onChange={(e) => setLanguage(e.target.value)}
+          aria-label={t("settings_language_label") || "Language"}
+          className="text-xs bg-surface-container-low border border-outline-variant/30 rounded-lg py-1.5 px-2 text-on-surface font-medium focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer hover:bg-surface-container transition-colors"
+        >
+          {supportedLanguages.map((lang) => (
+            <option key={lang} value={lang}>
+              {lang}
+            </option>
+          ))}
+        </select>
         <div className="relative">
           <button
             id="notification-bell"
@@ -124,14 +131,15 @@ export default function Header() {
                 </div>
                 <h5 className="font-label-md text-[14px] text-on-surface font-semibold mb-1">All caught up!</h5>
                 <p className="font-body-sm text-[12px] text-on-surface-variant max-w-[200px]">
-                  You don't have any notifications right now.
+                  You don&apos;t have any notifications right now.
                 </p>
               </div>
             </div>
           )}
         </div>
-        <Link href="/settings" className="focus:outline-none">
+        <Link href="/settings" className="focus:outline-none" aria-label="Profile Settings">
           {avatarUrl ? (
+            /* eslint-disable-next-line @next/next/no-img-element */
             <img
               alt="User Profile Avatar"
               className="w-8 h-8 rounded-full border border-outline-variant hover:border-primary/50 transition-colors object-cover"

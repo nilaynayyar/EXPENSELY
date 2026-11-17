@@ -1,28 +1,48 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { createClient } from "@/utils/supabase/client";
 import { useLanguage } from "./LanguageProvider";
 
-// Unified handler for placeholder actions — replace each case with real implementation
-const handleAction = (action: string) => {
-  const messages: Record<string, string> = {
-    upgrade: "Pro upgrade flow is coming soon. Thank you for your interest!",
-    help: "Help Center is launching soon. For urgent help, email support@expensely.app",
-    notifications: "Notification preferences are coming soon.",
-    default: "This feature is coming soon.",
-  };
-  alert(messages[action] ?? messages.default);
-};
-
 export default function Sidebar() {
   const pathname = usePathname();
-  const router = useRouter();
-  const supabase = createClient();
   const [isOpen, setIsOpen] = useState(false);
-  const { t } = useLanguage();
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const { t, language, setLanguage, supportedLanguages } = useLanguage();
+
+  const handleLogout = async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    setIsOpen(false);
+
+    try {
+      // 1. Client-side sign out through Supabase client
+      const supabase = createClient();
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.error("[Logout] Client sign-out error:", err);
+    }
+
+    try {
+      // 2. Server-side cookie cleanup through API route
+      await fetch("/auth/signout", { method: "POST" });
+    } catch (err) {
+      console.error("[Logout] Server sign-out error:", err);
+    }
+
+    // 3. Clear transient storage keys
+    if (typeof window !== "undefined") {
+      try {
+        sessionStorage.removeItem("lastReceiptImage");
+      } catch {}
+
+      // 4. Critical: Full window replacement to purge in-memory React state,
+      // Router caches, and prevent browser Back button from displaying cached data
+      window.location.replace("/login");
+    }
+  };
 
   const menuItems = [
     { name: "Dashboard", href: "/dashboard", icon: "dashboard" },
@@ -58,12 +78,30 @@ export default function Sidebar() {
           </div>
           <span className="font-headline-sm text-headline-sm font-black text-on-surface">Expensely</span>
         </div>
-        <button
-          onClick={() => setIsOpen(!isOpen)}
-          className="p-2 text-on-surface-variant hover:text-on-surface focus:outline-none"
-        >
-          <span className="material-symbols-outlined text-2xl">{isOpen ? "close" : "menu"}</span>
-        </button>
+        <div className="flex items-center space-x-2">
+          <select
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            aria-label={t("settings_language_label") || "Language"}
+            className="text-xs bg-surface-container-low border border-outline-variant/30 rounded-lg py-1 px-1.5 text-on-surface font-medium focus:outline-none cursor-pointer"
+          >
+            {supportedLanguages.map((lang) => (
+              <option key={lang} value={lang}>
+                {lang.split(" ")[0]}
+              </option>
+            ))}
+          </select>
+          <Link href="/settings" className="p-2 text-on-surface-variant hover:text-on-surface" aria-label="Settings">
+            <span className="material-symbols-outlined text-xl">settings</span>
+          </Link>
+          <button
+            onClick={() => setIsOpen(!isOpen)}
+            className="p-2 text-on-surface-variant hover:text-on-surface focus:outline-none"
+            aria-label="Toggle Menu"
+          >
+            <span className="material-symbols-outlined text-2xl">{isOpen ? "close" : "menu"}</span>
+          </button>
+        </div>
       </div>
 
       {/* Sidebar Navigation */}
@@ -102,7 +140,7 @@ export default function Sidebar() {
             onClick={() => setIsOpen(false)}
             className="block w-full py-2 px-4 bg-surface-container-low text-primary font-label-md text-label-md rounded-lg border border-outline-variant hover:bg-surface-container-high transition-colors mb-4 cursor-pointer text-left"
           >
-            Upgrade to Pro
+            {t("pricing_upgrade_pro") || "Upgrade to Pro"}
           </Link>
           <div className="space-y-1">
             {bottomItems.map((item) => {
@@ -110,15 +148,14 @@ export default function Sidebar() {
                 return (
                   <button
                     key={item.name}
-                    onClick={async () => {
-                      setIsOpen(false);
-                      await supabase.auth.signOut();
-                      router.push("/login");
-                    }}
-                    className={`${getLinkClass(item.href)} w-full text-left cursor-pointer`}
+                    onClick={handleLogout}
+                    disabled={isLoggingOut}
+                    className={`${getLinkClass(item.href)} w-full text-left cursor-pointer flex items-center disabled:opacity-50`}
                   >
-                    <span className="material-symbols-outlined mr-3">{item.icon}</span>
-                    {t(item.name)}
+                    <span className={`material-symbols-outlined mr-3 ${isLoggingOut ? "animate-spin" : ""}`}>
+                      {isLoggingOut ? "sync" : item.icon}
+                    </span>
+                    {isLoggingOut ? "Logging out..." : t(item.name)}
                   </button>
                 );
               }

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
+import { useLanguage } from "@/components/LanguageProvider";
 import {
   ResponsiveContainer,
   LineChart,
@@ -16,26 +17,27 @@ import {
   CartesianGrid,
 } from "recharts";
 
-// Prevents SSR hydration issues
+const emptySubscribe = () => () => {};
+
+// Prevents SSR hydration issues safely without cascading render warnings
 function ClientOnly({ children }: { children: React.ReactNode }) {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-  if (!mounted) return <div className="h-full w-full bg-surface-container-low/20 animate-pulse rounded-lg" />;
+  const isClient = useSyncExternalStore(emptySubscribe, () => true, () => false);
+  if (!isClient) return <div className="h-full w-full bg-surface-container-low/20 animate-pulse rounded-lg" />;
   return <>{children}</>;
 }
 
+const subscribeThemeClass = (callback: () => void) => {
+  if (typeof document === "undefined") return () => {};
+  const observer = new MutationObserver(callback);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+  return () => observer.disconnect();
+};
+const getIsDarkSnapshot = () => typeof document !== "undefined" && document.documentElement.classList.contains("dark");
+const getServerIsDark = () => false;
+
 // Returns theme-aware inline styles for recharts Tooltip (cannot use CSS classes here)
 function useTooltipStyle() {
-  const [isDark, setIsDark] = useState(false);
-  useEffect(() => {
-    const check = () => setIsDark(document.documentElement.classList.contains("dark"));
-    check();
-    const observer = new MutationObserver(check);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
-    return () => observer.disconnect();
-  }, []);
+  const isDark = useSyncExternalStore(subscribeThemeClass, getIsDarkSnapshot, getServerIsDark);
   return {
     background: isDark ? "rgba(19, 31, 46, 0.95)" : "rgba(255, 255, 255, 0.95)",
     border: isDark ? "1px solid rgba(108, 122, 113, 0.3)" : "1px solid #E2E8F0",
@@ -45,9 +47,27 @@ function useTooltipStyle() {
   };
 }
 
+export interface SpendingTrendPoint {
+  name: string;
+  amount: number;
+}
+
+export interface WeeklyComparisonPoint {
+  name: string;
+  thisWeek: number;
+  lastWeek: number;
+}
+
+export interface CategoryDataPoint {
+  name: string;
+  value: number;
+  color?: string;
+}
+
 // Spending Trends (Line Chart)
-export function SpendingLineChart({ data }: { data: any[] }) {
+export function SpendingLineChart({ data }: { data: SpendingTrendPoint[] }) {
   const tooltipStyle = useTooltipStyle();
+  const { t } = useLanguage();
   return (
     <ClientOnly>
       <ResponsiveContainer width="100%" height="100%">
@@ -75,7 +95,7 @@ export function SpendingLineChart({ data }: { data: any[] }) {
           />
           <Tooltip
             contentStyle={tooltipStyle}
-            formatter={(value) => [`₹${value}`, "Spent"]}
+            formatter={(value) => [`₹${Number(value).toLocaleString()}`, t("chart_spent")]}
           />
           <Line
             type="monotone"
@@ -92,8 +112,9 @@ export function SpendingLineChart({ data }: { data: any[] }) {
 }
 
 // Weekly Comparison (Bar Chart)
-export function SpendingBarChart({ data }: { data: any[] }) {
+export function SpendingBarChart({ data }: { data: WeeklyComparisonPoint[] }) {
   const tooltipStyle = useTooltipStyle();
+  const { t } = useLanguage();
   return (
     <ClientOnly>
       <ResponsiveContainer width="100%" height="100%">
@@ -115,10 +136,10 @@ export function SpendingBarChart({ data }: { data: any[] }) {
           />
           <Tooltip
             contentStyle={tooltipStyle}
-            formatter={(value) => [`₹${value}`, "Amount"]}
+            formatter={(value) => [`₹${Number(value).toLocaleString()}`, t("chart_amount")]}
           />
-          <Bar dataKey="thisWeek" fill="#10b981" radius={[4, 4, 0, 0]} name="This Week" />
-          <Bar dataKey="lastWeek" fill="#bbcabf" radius={[4, 4, 0, 0]} name="Last Week" />
+          <Bar dataKey="thisWeek" fill="#10b981" radius={[4, 4, 0, 0]} name={t("chart_this_period")} />
+          <Bar dataKey="lastWeek" fill="#bbcabf" radius={[4, 4, 0, 0]} name={t("chart_prior_period")} />
         </BarChart>
       </ResponsiveContainer>
     </ClientOnly>
@@ -126,9 +147,10 @@ export function SpendingBarChart({ data }: { data: any[] }) {
 }
 
 // Category Breakdown (Pie Chart)
-export function CategoryPieChart({ data }: { data: any[] }) {
+export function CategoryPieChart({ data }: { data: CategoryDataPoint[] }) {
   const COLORS = ["#006591", "#10b981", "#6d3bd7", "#ba1a1a", "#39b8fd"];
   const tooltipStyle = useTooltipStyle();
+  const { t } = useLanguage();
 
   return (
     <ClientOnly>
@@ -144,12 +166,12 @@ export function CategoryPieChart({ data }: { data: any[] }) {
             dataKey="value"
           >
             {data.map((entry, index) => (
-              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+              <Cell key={`cell-${entry.name || index}`} fill={entry.color || COLORS[index % COLORS.length]} />
             ))}
           </Pie>
           <Tooltip
             contentStyle={tooltipStyle}
-            formatter={(value) => [`₹${value}`, "Spent"]}
+            formatter={(value) => [`₹${Number(value).toLocaleString()}`, t("chart_spent")]}
           />
         </PieChart>
       </ResponsiveContainer>

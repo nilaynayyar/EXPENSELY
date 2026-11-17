@@ -1,56 +1,13 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useLanguage } from "@/components/LanguageProvider";
 import { createClient } from "@/utils/supabase/client";
 import Tesseract from "tesseract.js";
-
-// ---------------------------------------------------------------------------
-// Regex-based field extractors — best-effort heuristics, not guaranteed.
-// ---------------------------------------------------------------------------
-
-/** Try to find a monetary total (e.g. "Total: $12.34", "TOTAL 12,34", "Grand Total 1234.56") */
-function extractAmount(text: string): string | null {
-  const totalPatterns = [
-    /(?:grand\s*)?total[\s:]*[$€£₹]?\s*([\d,]+\.?\d{0,2})/i,
-    /(?:amount\s*(?:due|paid))[\s:]*[$€£₹]?\s*([\d,]+\.?\d{0,2})/i,
-    /[$€£₹]\s*([\d,]+\.\d{2})/,
-    /\b(\d{1,6}[.,]\d{2})\b/,
-  ];
-  for (const re of totalPatterns) {
-    const m = text.match(re);
-    if (m) return m[1].replace(/,/g, "");
-  }
-  return null;
-}
-
-/** Try to find a date in common receipt formats */
-function extractDate(text: string): string | null {
-  const datePatterns = [
-    /(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/,
-    /(\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})/,
-    /(\w{3,9}\s+\d{1,2},?\s+\d{4})/i,
-    /(\d{1,2}\s+\w{3,9}\s+\d{4})/i,
-  ];
-  for (const re of datePatterns) {
-    const m = text.match(re);
-    if (m) return m[1];
-  }
-  return null;
-}
-
-/** Merchant is usually the first non-empty, non-numeric line of the receipt */
-function extractMerchant(text: string): string | null {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  for (const line of lines.slice(0, 5)) {
-    if (/^\d+$/.test(line)) continue;
-    if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(line)) continue;
-    if (line.length < 3) continue;
-    return line;
-  }
-  return null;
-}
+import { extractReceiptData } from "@/lib/receipt-extraction";
+import { preprocessReceiptImage } from "@/lib/image-processing";
 
 // ---------------------------------------------------------------------------
 // Category mapping — keyword-based heuristic
@@ -71,31 +28,6 @@ function inferCategoryName(merchant: string, rawText: string): string {
     }
   }
   return "Other";
-}
-
-/** Try to normalize a raw date string into YYYY-MM-DD */
-function normalizeDateToISO(raw: string): string {
-  // Try native Date parse first
-  const d = new Date(raw);
-  if (!isNaN(d.getTime()) && d.getFullYear() > 1990) {
-    return d.toISOString().split("T")[0];
-  }
-  // DD/MM/YYYY or DD-MM-YYYY
-  const parts = raw.split(/[\/\-\.]/);
-  if (parts.length === 3) {
-    let [a, b, c] = parts.map(Number);
-    // If first part > 12, assume DD/MM/YYYY
-    if (a > 12 && b <= 12) {
-      if (c < 100) c += 2000;
-      return `${c}-${String(b).padStart(2, "0")}-${String(a).padStart(2, "0")}`;
-    }
-    // MM/DD/YYYY
-    if (a <= 12 && b <= 31) {
-      if (c < 100) c += 2000;
-      return `${c}-${String(a).padStart(2, "0")}-${String(b).padStart(2, "0")}`;
-    }
-  }
-  return new Date().toISOString().split("T")[0]; // fallback to today
 }
 
 // ---------------------------------------------------------------------------
@@ -123,9 +55,10 @@ export default function ScannerPage() {
   // --- state ---------------------------------------------------------------
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [file, setFile] = useState<File | null>(null);
+  const [, setFile] = useState<File | null>(null);
   const [qrUrl, setQrUrl] = useState<string>("");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [pairingToken, setPairingToken] = useState<string | null>(null);
   const [timeLeft, setTimeLeft] = useState<number>(900); // 15 minutes
 
   // Initialize scan session
@@ -135,6 +68,7 @@ export default function ScannerPage() {
         const res = await fetch("/api/scan-session", { method: "POST" });
         const data = await res.json();
         if (data.id) setSessionId(data.id);
+        if (data.token) setPairingToken(data.token);
       } catch (err) {
         console.error("Failed to create scan session:", err);
       }
@@ -171,8 +105,8 @@ export default function ScannerPage() {
   useEffect(() => {
     const init = async () => {
       const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) setUserId(session.user.id);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) setUserId(user.id);
 
       const { data: cats } = await supabase.from("categories").select("*").order("name");
       if (cats) setCategories(cats);
@@ -181,33 +115,60 @@ export default function ScannerPage() {
   }, []);
 
   // --- QR generation -------------------------------------------------------
-  // Use window.location.origin — always matches the host the browser connected
-  // to, which is exactly what the mobile device needs for LAN access.
+  // Automatically resolves LAN IP if on localhost, ensuring mobile devices on the same Wi-Fi can open the upload page.
   useEffect(() => {
-    if (!sessionId) return;
-    const uploadUrl = `${window.location.origin}/scan-upload?id=${sessionId}`;
-    console.log("[scanner] QR URL:", uploadUrl);
-    setQrUrl(
-      `https://api.qrserver.com/v1/create-qr-code/?size=250x250&ecc=H&margin=2&data=${encodeURIComponent(uploadUrl)}`
-    );
-  }, [sessionId]);
+    if (!sessionId || !pairingToken) return;
+    let isCancelled = false;
+
+    const resolveQrUrl = async () => {
+      let baseOrigin = window.location.origin;
+      if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+        try {
+          const res = await fetch("/api/network-info");
+          if (res.ok) {
+            const data = await res.json();
+            if (data.ip && data.ip !== "localhost") {
+              const port = window.location.port ? `:${window.location.port}` : "";
+              baseOrigin = `http://${data.ip}${port}`;
+            }
+          }
+        } catch {
+          // fallback to origin
+        }
+      }
+      if (isCancelled) return;
+      const uploadUrl = `${baseOrigin}/scan-upload?id=${sessionId}&token=${pairingToken}`;
+      console.log("[scanner] QR URL:", uploadUrl);
+      setQrUrl(
+        `https://api.qrserver.com/v1/create-qr-code/?size=250x250&ecc=H&margin=2&data=${encodeURIComponent(uploadUrl)}`
+      );
+    };
+
+    resolveQrUrl();
+    return () => {
+      isCancelled = true;
+    };
+  }, [sessionId, pairingToken]);
 
   // --- QR countdown + auto-refresh -----------------------------------------
   useEffect(() => {
     if (!sessionId) return;
-
-    setTimeLeft(900); // 15 minutes
 
     const tick = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           // Timer hit zero: rotate session
           clearInterval(tick);
-          // Invalidate old session then create a fresh one
-          fetch(`/api/scan-session?id=${sessionId}`, { method: "DELETE" }).catch(() => {});
+          // Invalidate old session securely with pairing token, then create fresh one
+          if (sessionId && pairingToken) {
+            fetch(`/api/scan-session?id=${sessionId}&token=${pairingToken}`, { method: "DELETE" }).catch(() => {});
+          }
           fetch("/api/scan-session", { method: "POST" })
             .then((res) => res.json())
-            .then((data) => { if (data.id) setSessionId(data.id); })
+            .then((data) => {
+              if (data.id) setSessionId(data.id);
+              if (data.token) setPairingToken(data.token);
+            })
             .catch((err) => console.error("Failed to refresh scan session:", err));
           return 0;
         }
@@ -216,7 +177,7 @@ export default function ScannerPage() {
     }, 1000);
 
     return () => clearInterval(tick);
-  }, [sessionId]);
+  }, [sessionId, pairingToken]);
 
   // --- Clean up object URL on unmount / new file ---------------------------
   useEffect(() => {
@@ -241,7 +202,7 @@ export default function ScannerPage() {
     [categories]
   );
 
-  // --- Real OCR pipeline ---------------------------------------------------
+  // --- Real OCR pipeline with Preprocessing & Multi-Field Extraction ---
   const processReceipt = useCallback(async (selectedFile: File) => {
     // Reset everything
     setOcrText("");
@@ -260,8 +221,37 @@ export default function ScannerPage() {
     const url = URL.createObjectURL(selectedFile);
     setPreviewUrl(url);
 
+    // Save image to sessionStorage for review page
+    if (typeof window !== "undefined") {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === "string") {
+          try {
+            sessionStorage.setItem("lastReceiptImage", reader.result);
+          } catch {
+            // sessionStorage might exceed quota for large raw images
+          }
+        }
+      };
+      reader.readAsDataURL(selectedFile);
+    }
+
     try {
-      const result = await Tesseract.recognize(selectedFile, "eng", {
+      // 1. Image Preprocessing (orientation, contrast enhancement, denoising)
+      let fileToOcr: File | Blob = selectedFile;
+      try {
+        const { processedBlob } = await preprocessReceiptImage(selectedFile, {
+          grayscale: true,
+          enhanceContrast: true,
+          denoise: true,
+        });
+        fileToOcr = processedBlob;
+      } catch (prepErr) {
+        console.warn("Preprocessing skipped, processing original image:", prepErr);
+      }
+
+      // 2. Client-side OCR via Tesseract.js
+      const result = await Tesseract.recognize(fileToOcr, "eng", {
         logger: (info) => {
           if (info.status === "recognizing text" && typeof info.progress === "number") {
             setProgress(Math.round(info.progress * 100));
@@ -270,40 +260,35 @@ export default function ScannerPage() {
       });
 
       const rawText = result.data.text;
-      const confidence = result.data.confidence; // 0-100
       setOcrText(rawText);
-      setOcrConfidence(confidence);
 
-      const merchant = extractMerchant(rawText);
-      const amount = extractAmount(rawText);
-      const date = extractDate(rawText);
+      // 3. High-precision extraction and arithmetic cross-validation
+      const extracted = extractReceiptData(rawText);
+      setOcrConfidence(extracted.confidence.overall);
 
-      setParsedFields({ merchant, amount, date });
+      setParsedFields({
+        merchant: extracted.merchant,
+        amount: extracted.total !== null ? String(extracted.total) : null,
+        date: extracted.date,
+      });
       setOcrDone(true);
 
       // Pre-fill the confirmation form
-      setEditMerchant(merchant || "");
-      setEditAmount(amount || "");
-      setEditDate(date ? normalizeDateToISO(date) : new Date().toISOString().split("T")[0]);
+      setEditMerchant(extracted.merchant || "");
+      setEditAmount(extracted.total !== null ? String(extracted.total) : "");
+      setEditDate(extracted.date || new Date().toISOString().split("T")[0]);
 
       // Auto-detect category
-      const catName = inferCategoryName(merchant || "", rawText);
-      // We set category after categories are loaded; findCategoryId needs categories
-      // So we defer this slightly
+      const catName = inferCategoryName(extracted.merchant || "", rawText);
       setTimeout(() => {
         setEditCategoryId((prev) => {
-          if (prev) return prev; // already set
+          if (prev) return prev;
           return findCategoryId(catName);
         });
       }, 0);
 
-      // If confidence is low (<50) or key fields are missing, show confirmation
-      if (confidence < 50 || !merchant || !amount) {
-        setShowConfirm(true);
-      } else {
-        // High confidence — still show confirmation so user can verify
-        setShowConfirm(true);
-      }
+      // Show confirmation dialog for verification
+      setShowConfirm(true);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "OCR processing failed.";
       setOcrError(message);
@@ -314,14 +299,14 @@ export default function ScannerPage() {
 
   // --- Poll for scan session upload ----------------------------------------
   useEffect(() => {
-    if (!sessionId || ocrDone || uploading) return;
+    if (!sessionId || !pairingToken || ocrDone || uploading) return;
 
     const interval = setInterval(async () => {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
 
       try {
-        const res = await fetch(`/api/scan-session?id=${sessionId}`, {
+        const res = await fetch(`/api/scan-session?id=${sessionId}&token=${pairingToken}`, {
           signal: controller.signal,
           cache: "no-store",
         });
@@ -336,25 +321,29 @@ export default function ScannerPage() {
           clearInterval(interval);
 
           const dataUrl: string = data.image;
+          let file: File;
 
-          const mimeMatch = dataUrl.match(/^data:([^;]+);base64,/);
-          const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
+          if (dataUrl.startsWith("http://") || dataUrl.startsWith("https://")) {
+            const resp = await fetch(dataUrl);
+            const blob = await resp.blob();
+            file = new File([blob], data.fileName || "receipt.jpg", {
+              type: blob.type || "image/jpeg",
+            });
+          } else {
+            const mimeMatch = dataUrl.match(/^data:([^;]+);base64,/);
+            const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
 
-          const base64 = dataUrl.replace(/^data:[^;]+;base64,/, "");
-          const binary = atob(base64);
+            const base64 = dataUrl.replace(/^data:[^;]+;base64,/, "");
+            const binary = atob(base64);
 
-          const bytes = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+              bytes[i] = binary.charCodeAt(i);
+            }
+
+            const blob = new Blob([bytes], { type: mimeType });
+            file = new File([blob], data.fileName || "receipt.jpg", { type: mimeType });
           }
-
-          const blob = new Blob([bytes], { type: mimeType });
-
-          const file = new File(
-            [blob],
-            data.fileName || "receipt.jpg",
-            { type: mimeType }
-          );
 
           processReceipt(file);
         }
@@ -366,15 +355,7 @@ export default function ScannerPage() {
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [sessionId, ocrDone, uploading, processReceipt]);
-
-  // --- Update category when fields/categories change ----------------------
-  useEffect(() => {
-    if (ocrDone && categories.length > 0 && !editCategoryId) {
-      const catName = inferCategoryName(editMerchant, ocrText);
-      setEditCategoryId(findCategoryId(catName));
-    }
-  }, [ocrDone, categories, editCategoryId, editMerchant, ocrText, findCategoryId]);
+  }, [sessionId, pairingToken, ocrDone, uploading, processReceipt]);
 
   // --- Duplicate detection -------------------------------------------------
   const checkDuplicate = useCallback(async (): Promise<boolean> => {
@@ -459,14 +440,18 @@ export default function ScannerPage() {
 
   const insertExpense = async (amount: number) => {
     const supabase = createClient();
+    const wasAltered = parsedFields.amount !== editAmount || parsedFields.merchant !== editMerchant.trim();
+    const isUnspecified = !editMerchant.trim() || editMerchant.trim().toLowerCase() === "unspecified merchant";
+    const status = (ocrConfidence >= 65 && !wasAltered && !isUnspecified) ? "Verified" : "Pending";
+
     const { error: insertError } = await supabase.from("expenses").insert([
       {
         user_id: userId,
-        store: editMerchant.trim(),
+        store: editMerchant.trim() || "Unspecified Merchant",
         category_id: editCategoryId,
         amount,
         date: editDate,
-        status: ocrConfidence >= 50 ? "Verified" : "Pending",
+        status,
       },
     ]);
 
@@ -582,7 +567,7 @@ export default function ScannerPage() {
                   }}
                 />
               </label>
-              <label className="bg-surface border border-outline-variant text-on-surface font-label-md text-label-md py-3 px-6 rounded-lg hover:bg-surface-container-low transition-colors flex md:hidden items-center gap-2 cursor-pointer focus:outline-none">
+              <label className="bg-surface border border-outline-variant text-on-surface font-label-md text-label-md py-3 px-6 rounded-lg hover:bg-surface-container-low transition-colors flex items-center gap-2 cursor-pointer focus:outline-none">
                 <span className="material-symbols-outlined text-[18px]">photo_camera</span>
                 Take Photo
                 <input
@@ -797,8 +782,9 @@ export default function ScannerPage() {
                   {!duplicateWarning && (
                     <button
                       onClick={handleSaveExpense}
-                      disabled={saving}
-                      className="w-full sm:w-auto py-3 px-8 bg-primary text-on-primary font-label-md text-label-md rounded-lg shadow-sm hover:opacity-95 transition-opacity font-bold flex items-center justify-center gap-2 disabled:opacity-60"
+                      disabled={saving || !editAmount || parseFloat(editAmount) <= 0}
+                      title={!editAmount || parseFloat(editAmount) <= 0 ? "Total amount must be confirmed before saving" : ""}
+                      className="w-full sm:w-auto py-3 px-8 bg-primary text-on-primary font-label-md text-label-md rounded-lg shadow-sm hover:opacity-95 transition-opacity font-bold flex items-center justify-center gap-2 disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed"
                     >
                       <span className="material-symbols-outlined text-[18px]">save</span>
                       {saving ? "Saving…" : "Save Expense"}
@@ -842,7 +828,14 @@ export default function ScannerPage() {
             </p>
             <div className="bg-white p-2 rounded-lg mb-4 shadow-sm w-[250px] h-[250px] mx-auto flex items-center justify-center">
               {qrUrl ? (
-                <img src={qrUrl} alt="QR Code to upload receipt from mobile" className="w-full h-full object-contain" />
+                <Image
+                  src={qrUrl}
+                  alt="QR Code to upload receipt from mobile"
+                  width={234}
+                  height={234}
+                  unoptimized
+                  className="w-full h-full object-contain"
+                />
               ) : (
                 <div className="w-full h-full bg-surface-container-high animate-pulse rounded" />
               )}
