@@ -215,7 +215,7 @@ export default function ScannerPage() {
           clearInterval(tick);
           // Invalidate old session securely with pairing token, then create fresh one
           if (sessionId && pairingToken) {
-            fetch(`/api/scan-session?id=${sessionId}&token=${pairingToken}`, { method: "DELETE" }).catch(() => {});
+            fetch(`/api/scan-session?id=${sessionId}&token=${pairingToken}`, { method: "DELETE" }).catch(() => { });
           }
           createSession();
           return 0;
