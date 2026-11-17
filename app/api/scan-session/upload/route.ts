@@ -7,6 +7,7 @@ import {
   isValidToken,
 } from "@/lib/scan-session";
 import { getAdminClient } from "@/lib/supabase-admin";
+import { createClient } from "@/utils/supabase/server";
 
 const ALLOWED_MIME_TYPES = new Set([
   "image/jpeg",
@@ -106,7 +107,18 @@ export async function POST(req: NextRequest) {
     let createdExpenseData: Record<string, unknown> | null = null;
 
     const shouldCreateExpense = formData.get("createExpense") !== "false";
-    if (shouldCreateExpense && session.userId) {
+    let targetUserId = session.userId;
+    if (!targetUserId) {
+      try {
+        const supabase = await createClient();
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) targetUserId = user.id;
+      } catch {
+        // ignore
+      }
+    }
+
+    if (shouldCreateExpense && targetUserId) {
       try {
         const admin = getAdminClient();
         const storeName = (formData.get("store") as string)?.trim() || "Receipt Scan";
@@ -134,7 +146,7 @@ export async function POST(req: NextRequest) {
           .from("expenses")
           .insert([
             {
-              user_id: session.userId,
+              user_id: targetUserId,
               store: storeName,
               amount: isNaN(parsedAmount) ? 0 : parsedAmount,
               date: expenseDate,

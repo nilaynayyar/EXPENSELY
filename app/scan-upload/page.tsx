@@ -67,8 +67,7 @@ function UploadForm() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const cameraInputRef = useRef<HTMLInputElement | null>(null);
-  const galleryInputRef = useRef<HTMLInputElement | null>(null);
+
 
   // Session validation state
   const [sessionStatus, setSessionStatus] = useState<"checking" | "valid" | "expired">(() => {
@@ -449,21 +448,21 @@ function UploadForm() {
   // ── Render: Active Mobile Companion UI ─────────────────────────────────────
   return (
     <div className="glass-panel p-6 sm:p-8 rounded-2xl max-w-md w-full border border-outline-variant/30 relative overflow-hidden shadow-xl">
-      {/* Hidden system camera input (accessible via cameraInputRef) */}
+      {/* Native system camera input (accessible via label htmlFor="native-camera-input") */}
       <input
-        ref={cameraInputRef}
+        id="native-camera-input"
         type="file"
         accept="image/*"
         capture="environment"
-        style={{ position: "fixed", top: "-9999px", left: "-9999px", opacity: 0, width: "1px", height: "1px", pointerEvents: "none" }}
+        className="sr-only"
         onChange={handleFileChange}
       />
-      {/* Hidden photo library input (accessible via galleryInputRef) */}
+      {/* Native photo library input (accessible via label htmlFor="native-gallery-input") */}
       <input
-        ref={galleryInputRef}
+        id="native-gallery-input"
         type="file"
-        accept="image/png, image/jpeg, image/webp, image/heic"
-        style={{ position: "fixed", top: "-9999px", left: "-9999px", opacity: 0, width: "1px", height: "1px", pointerEvents: "none" }}
+        accept="image/png, image/jpeg, image/webp, image/heic, image/*"
+        className="sr-only"
         onChange={handleFileChange}
       />
       <canvas ref={canvasRef} className="hidden" />
@@ -724,10 +723,9 @@ function UploadForm() {
               </div>
 
               {/* 1. Primary Action: Take Photo with Phone Camera */}
-              <button
-                type="button"
-                onClick={() => cameraInputRef.current?.click()}
-                className="w-full py-4 px-5 rounded-2xl bg-primary text-white flex items-center justify-between font-bold shadow-md hover:opacity-95 active:scale-[0.99] transition cursor-pointer"
+              <label
+                htmlFor="native-camera-input"
+                className="w-full py-4 px-5 rounded-2xl bg-primary text-white flex items-center justify-between font-bold shadow-md hover:opacity-95 active:scale-[0.99] transition cursor-pointer select-none"
               >
                 <div className="flex items-center gap-3">
                   <div className="w-11 h-11 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
@@ -735,14 +733,28 @@ function UploadForm() {
                   </div>
                   <div className="text-left">
                     <div className="text-base font-bold leading-tight">Take Photo with Camera</div>
-                    <div className="text-xs font-normal text-white/80 mt-0.5">Launches phone camera app</div>
+                    <div className="text-xs font-normal text-white/80 mt-0.5">Opens your phone camera</div>
                   </div>
                 </div>
                 <span className="material-symbols-outlined text-white/80">chevron_right</span>
-              </button>
+              </label>
 
               {/* 2. Secondary Options Grid */}
               <div className="grid grid-cols-2 gap-3 pt-1">
+                {/* Choose from Photos / Gallery */}
+                <label
+                  htmlFor="native-gallery-input"
+                  className="p-3.5 rounded-xl border border-outline-variant/50 bg-surface-container-low hover:bg-surface-container-high active:scale-[0.99] transition flex flex-col items-center justify-center text-center gap-1.5 cursor-pointer select-none"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-secondary/10 text-secondary flex items-center justify-center">
+                    <span className="material-symbols-outlined text-xl">photo_library</span>
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-on-surface block">Choose from Gallery</span>
+                    <span className="text-[10px] text-on-surface-variant block">Select photo</span>
+                  </div>
+                </label>
+
                 {/* Live Viewfinder */}
                 <button
                   type="button"
@@ -759,35 +771,8 @@ function UploadForm() {
                   </div>
                   <div>
                     <span className="text-xs font-bold text-on-surface block">Live Viewfinder</span>
-                    <span className="text-[10px] text-on-surface-variant block">In-screen framing</span>
+                    <span className="text-[10px] text-on-surface-variant block">In-screen camera</span>
                   </div>
-                </button>
-
-                {/* Choose from Files / Gallery */}
-                <button
-                  type="button"
-                  onClick={() => galleryInputRef.current?.click()}
-                  className="p-3.5 rounded-xl border border-outline-variant/50 bg-surface-container-low hover:bg-surface-container-high active:scale-[0.99] transition flex flex-col items-center justify-center text-center gap-1.5 cursor-pointer"
-                >
-                  <div className="w-9 h-9 rounded-lg bg-secondary/10 text-secondary flex items-center justify-center">
-                    <span className="material-symbols-outlined text-xl">photo_library</span>
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-on-surface block">Choose from Files</span>
-                    <span className="text-[10px] text-on-surface-variant block">Gallery or files</span>
-                  </div>
-                </button>
-              </div>
-
-              {/* 3. Upload Receipt Standby Button */}
-              <div className="pt-1">
-                <button
-                  type="button"
-                  disabled
-                  className="w-full py-3.5 px-4 rounded-xl bg-surface-container-high/60 text-on-surface-variant/50 font-bold border border-outline-variant/30 flex items-center justify-center gap-2 cursor-not-allowed text-xs"
-                >
-                  <span className="material-symbols-outlined text-base">cloud_upload</span>
-                  <span>Upload Receipt (Take photo or select file first)</span>
                 </button>
               </div>
 

@@ -148,6 +148,44 @@ function LoginForm() {
     }
   };
 
+  const handleDirectSetPasswordAndSignIn = async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !password || password.length < 6) {
+      setError("Please enter your email and a password with at least 6 characters.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/auth/set-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: normalizedEmail, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to set password.");
+      }
+      const supabase = createClient();
+      const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password,
+      });
+      if (signInErr || !signInData?.session) {
+        throw new Error(signInErr?.message || "Sign in failed after updating password.");
+      }
+      const rawRedirect = searchParams.get("redirect") || "/dashboard";
+      const safePath = sanitizeRedirectPath(rawRedirect, "/dashboard");
+      router.push(safePath);
+      router.refresh();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to set password and sign in.";
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e?.preventDefault) e.preventDefault();
     setError(null);
@@ -189,7 +227,7 @@ function LoginForm() {
           const errMsg = signInError.message?.toLowerCase() || "";
           if (errMsg.includes("invalid login credentials") || signInError.status === 400) {
             setError(
-              `${t("auth_err_invalid_credentials")} If you recently registered, please ensure your email has been confirmed.`
+              "Invalid email or password. If you signed up with Google or need to reset your password, you can set it below to sign in directly."
             );
             setShowResendBtn(true);
           } else if (errMsg.includes("email not confirmed") || errMsg.includes("unconfirmed")) {
@@ -226,6 +264,29 @@ function LoginForm() {
         if (signUpError) {
           const errMsg = signUpError.message?.toLowerCase() || "";
           if (errMsg.includes("already registered") || errMsg.includes("user already exists")) {
+            // Attempt to link/set this password directly and sign in
+            try {
+              const res = await fetch("/api/auth/set-password", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email: normalizedEmail, password }),
+              });
+              if (res.ok) {
+                const linkedSignIn = await supabase.auth.signInWithPassword({
+                  email: normalizedEmail,
+                  password,
+                });
+                if (linkedSignIn.data?.session) {
+                  const rawRedirect = searchParams.get("redirect") || "/dashboard";
+                  const safePath = sanitizeRedirectPath(rawRedirect, "/dashboard");
+                  router.push(safePath);
+                  router.refresh();
+                  return;
+                }
+              }
+            } catch {
+              // fallback
+            }
             setError(t("auth_err_existing_account"));
             setShowResendBtn(true);
           } else if (errMsg.includes("weak") || errMsg.includes("characters")) {
@@ -240,7 +301,31 @@ function LoginForm() {
 
         // Detection of already existing user (Supabase Auth email enumeration protection returns empty identities)
         if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
-          setError(t("auth_err_existing_account"));
+          // Account already exists (e.g. registered via Google OAuth).
+          // Automatically set the user's desired password and sign in immediately!
+          try {
+            const res = await fetch("/api/auth/set-password", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ email: normalizedEmail, password }),
+            });
+            if (res.ok) {
+              const linkedSignIn = await supabase.auth.signInWithPassword({
+                email: normalizedEmail,
+                password,
+              });
+              if (linkedSignIn.data?.session) {
+                const rawRedirect = searchParams.get("redirect") || "/dashboard";
+                const safePath = sanitizeRedirectPath(rawRedirect, "/dashboard");
+                router.push(safePath);
+                router.refresh();
+                return;
+              }
+            }
+          } catch {
+            // fallback
+          }
+          setError("This email already has an account. Please sign in with your password or use Google.");
           setShowResendBtn(true);
           return;
         }
@@ -252,7 +337,7 @@ function LoginForm() {
           return;
         }
 
-        // Auto-confirm via RPC and sign in immediately so user is never blocked by email delays
+        // Auto-confirm via API and sign in immediately so user is never blocked by email delays
         try {
           await supabase.rpc("confirm_user_email", { user_email: normalizedEmail });
           const retrySignIn = await supabase.auth.signInWithPassword({
@@ -273,17 +358,18 @@ function LoginForm() {
         setResendCooldown(60);
       } else if (mode === "forgot_password") {
         try {
-          // 1. Update password directly via secure database RPC
-          const { error: rpcErr } = await supabase.rpc("set_user_password", {
-            user_email: normalizedEmail,
-            new_plain_password: password,
+          // Update password directly via secure API route and database RPC
+          const res = await fetch("/api/auth/set-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: normalizedEmail, password }),
           });
-
-          if (rpcErr) {
-            throw new Error(rpcErr.message);
+          const resData = await res.json();
+          if (!res.ok) {
+            throw new Error(resData.error || "Failed to update password.");
           }
 
-          // 2. Immediately sign in with the new password
+          // Immediately sign in with the new password
           const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({
             email: normalizedEmail,
             password,
@@ -397,6 +483,18 @@ function LoginForm() {
                 )}
 
                 <div className="w-full space-y-3">
+                  {password ? (
+                    <button
+                      type="button"
+                      onClick={handleDirectSetPasswordAndSignIn}
+                      disabled={loading}
+                      className="w-full py-3 px-4 bg-primary text-white rounded-lg font-label-md text-label-md font-bold hover:opacity-95 transition cursor-pointer flex items-center justify-center gap-2 shadow"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">bolt</span>
+                      <span>Skip Email & Sign In Directly</span>
+                    </button>
+                  ) : null}
+
                   <button
                     type="button"
                     onClick={handleResendVerification}
@@ -420,7 +518,7 @@ function LoginForm() {
                       setError(null);
                       setSuccess(null);
                     }}
-                    className="w-full py-3 px-4 bg-primary text-on-primary rounded-lg font-label-md text-label-md font-bold hover:opacity-90 transition-opacity cursor-pointer flex items-center justify-center gap-2"
+                    className="w-full py-3 px-4 bg-surface-container-low text-on-surface border border-outline-variant/60 rounded-lg font-label-md text-label-md font-bold hover:bg-surface-container transition cursor-pointer flex items-center justify-center gap-2"
                   >
                     <span className="material-symbols-outlined text-[18px]">login</span>
                     {t("auth_back_to_sign_in")}
@@ -456,33 +554,48 @@ function LoginForm() {
                   </div>
                 )}
 
-                {/* Resend Verification / Password Setup Action Button */}
+                {/* Frictionless Password Set / Instant Access Card */}
                 {showResendBtn && (
-                  <div className="w-full mb-4 p-3.5 rounded-xl bg-primary/10 border border-primary/20 flex flex-col items-center gap-2.5 text-center">
-                    <span className="text-xs text-on-surface-variant font-medium">
-                      If you created this account with Google or forgot your password, set a password below to sign in immediately:
-                    </span>
-                    <div className="flex flex-col sm:flex-row items-center gap-2 w-full pt-1">
+                  <div className="w-full mb-4 p-4 rounded-xl bg-primary/10 border border-primary/25 flex flex-col items-center gap-3 text-center">
+                    <div className="flex items-center gap-1.5 text-primary font-bold text-xs uppercase tracking-wider">
+                      <span className="material-symbols-outlined text-base">lock_reset</span>
+                      <span>Instant Account Access</span>
+                    </div>
+                    <p className="text-xs text-on-surface-variant leading-relaxed">
+                      Signed up with Google or need to set your password? Set it below to log in immediately with zero email waiting:
+                    </p>
+                    <div className="flex flex-col sm:flex-row items-center gap-2 w-full pt-0.5">
+                      {password && password.length >= 6 ? (
+                        <button
+                          type="button"
+                          onClick={handleDirectSetPasswordAndSignIn}
+                          disabled={loading}
+                          className="w-full py-2.5 px-3 bg-primary text-white text-xs font-bold rounded-lg shadow hover:opacity-95 transition cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-60"
+                        >
+                          <span className="material-symbols-outlined text-sm">check_circle</span>
+                          <span>Set this password & Sign In</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMode("forgot_password");
+                            setError(null);
+                            setShowResendBtn(false);
+                          }}
+                          className="w-full py-2.5 px-3 bg-primary text-white text-xs font-bold rounded-lg shadow hover:opacity-95 transition cursor-pointer flex items-center justify-center gap-1.5"
+                        >
+                          <span className="material-symbols-outlined text-sm">key</span>
+                          <span>Set / Reset Password</span>
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => {
-                          setMode("forgot_password");
-                          setError(null);
-                          setShowResendBtn(false);
-                        }}
-                        className="w-full py-2 px-3 bg-primary text-white text-xs font-bold rounded-lg shadow hover:opacity-95 transition cursor-pointer flex items-center justify-center gap-1.5"
+                        onClick={handleGoogleLogin}
+                        className="w-full py-2.5 px-3 border border-outline-variant/60 bg-surface text-xs font-semibold text-on-surface rounded-lg hover:bg-surface-container-low transition cursor-pointer flex items-center justify-center gap-1.5"
                       >
-                        <span className="material-symbols-outlined text-sm">key</span>
-                        <span>Set / Reset Password</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={resending || resendCooldown > 0}
-                        onClick={handleResendVerification}
-                        className="w-full py-2 px-3 border border-outline-variant/60 bg-surface-container-lowest text-xs font-semibold text-on-surface rounded-lg hover:bg-surface-container-low transition cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
-                      >
-                        <span className="material-symbols-outlined text-sm">verified_user</span>
-                        <span>Auto-Verify Account</span>
+                        <span className="material-symbols-outlined text-sm">account_circle</span>
+                        <span>Continue with Google</span>
                       </button>
                     </div>
                   </div>
