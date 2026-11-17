@@ -133,7 +133,16 @@ export async function createScanSession(
     ]);
 
     if (insertErr) {
-      throw new Error(`[ScanSession] Production database session insertion failed: ${insertErr.message}`);
+      // Direct table insert may be blocked by RLS if running with anon key; fall back to security definer RPC
+      const { data: rpcCreated, error: rpcErr } = await admin.rpc("rpc_create_scan_session", {
+        p_id: id,
+        p_user_id: userId || null,
+        p_token_hash: tokenHash,
+        p_expires_at: new Date(expiresAt).toISOString(),
+      });
+      if (rpcErr || rpcCreated === false) {
+        throw new Error(`[ScanSession] Production database session insertion failed: ${insertErr.message || rpcErr?.message}`);
+      }
     }
 
     return { session, token };
@@ -182,6 +191,23 @@ export async function getScanSession(id: string): Promise<ScanSessionRecord | nu
         .single();
 
       if (error || !data) {
+        // Fallback to rpc_get_scan_session
+        const { data: rpcData, error: rpcErr } = await admin.rpc("rpc_get_scan_session", { p_id: id });
+        if (!rpcErr && rpcData) {
+          const expAt = typeof rpcData.expiresAt === "number" ? rpcData.expiresAt : new Date(rpcData.expiresAt).getTime();
+          if (Date.now() > expAt) return null;
+          return {
+            id: rpcData.id,
+            userId: rpcData.userId,
+            tokenHash: rpcData.tokenHash,
+            status: rpcData.status,
+            image: rpcData.image,
+            fileName: rpcData.fileName,
+            fileType: rpcData.fileType,
+            createdAt: typeof rpcData.createdAt === "number" ? rpcData.createdAt : new Date(rpcData.createdAt).getTime(),
+            expiresAt: expAt,
+          };
+        }
         return null;
       }
 
@@ -297,31 +323,44 @@ export async function updateScanSessionImage(
       const admin = getAdminClient();
       const tokenHash = hashToken(token);
 
-      // Try calling atomic stored function complete_scan_session_upload
+      // Try calling atomic stored functions
       let rpcSuccess = false;
       try {
         const { data: rpcResult, error: rpcErr } = await admin.rpc(
-          "complete_scan_session_upload",
+          "rpc_update_scan_session_image",
           {
-            p_session_id: id,
+            p_id: id,
             p_token_hash: tokenHash,
-            p_image_url: image.startsWith("data:") ? null : image,
+            p_image_url: image,
             p_file_name: fileName,
             p_file_type: fileType,
           }
         );
-        if (!rpcErr && typeof rpcResult === "boolean") {
+        if (!rpcErr && typeof rpcResult === "boolean" && rpcResult) {
           rpcSuccess = true;
-          if (!rpcResult) {
-            return {
-              success: false,
-              error: "Conflict: Atomic state transition failed or session expired",
-              status: 409,
-            };
-          }
         }
       } catch {
-        // RPC function not yet deployed; fall back to direct update
+        // Fall back to next method
+      }
+
+      if (!rpcSuccess) {
+        try {
+          const { data: rpcResult, error: rpcErr } = await admin.rpc(
+            "complete_scan_session_upload",
+            {
+              p_session_id: id,
+              p_token_hash: tokenHash,
+              p_image_url: image,
+              p_file_name: fileName,
+              p_file_type: fileType,
+            }
+          );
+          if (!rpcErr && typeof rpcResult === "boolean" && rpcResult) {
+            rpcSuccess = true;
+          }
+        } catch {
+          // RPC function not yet deployed; fall back to direct update
+        }
       }
 
       if (!rpcSuccess) {
@@ -329,7 +368,7 @@ export async function updateScanSessionImage(
           .from("scan_sessions")
           .update({
             status: "uploaded",
-            image_url: image.startsWith("data:") ? null : image,
+            image_url: image,
             file_name: fileName,
             file_type: fileType,
           })
@@ -472,9 +511,16 @@ export async function deleteScanSession(
   if (isProduction) {
     try {
       const admin = getAdminClient();
+      const tokenHash = token ? hashToken(token) : null;
       const { error } = await admin.from("scan_sessions").delete().eq("id", id);
       if (error) {
-        return { success: false, status: 500, error: error.message };
+        const { error: rpcErr } = await admin.rpc("rpc_delete_scan_session", {
+          p_id: id,
+          p_token_hash: tokenHash,
+        });
+        if (rpcErr) {
+          return { success: false, status: 500, error: error.message || rpcErr.message };
+        }
       }
       return { success: true, status: 200 };
     } catch (err: unknown) {

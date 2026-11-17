@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
+import QRCode from "qrcode";
 import { useLanguage } from "@/components/LanguageProvider";
 import { createClient } from "@/utils/supabase/client";
 import Tesseract from "tesseract.js";
@@ -60,21 +61,37 @@ export default function ScannerPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [pairingToken, setPairingToken] = useState<string | null>(null);
   const [timeLeft, setTimeLeft] = useState<number>(900); // 15 minutes
+  const [sessionLoading, setSessionLoading] = useState<boolean>(true);
+  const [sessionError, setSessionError] = useState<string>("");
+  const [mobileUploadUrl, setMobileUploadUrl] = useState<string>("");
+  const [copiedLink, setCopiedLink] = useState<boolean>(false);
 
-  // Initialize scan session
-  useEffect(() => {
-    const createSession = async () => {
-      try {
-        const res = await fetch("/api/scan-session", { method: "POST" });
-        const data = await res.json();
-        if (data.id) setSessionId(data.id);
-        if (data.token) setPairingToken(data.token);
-      } catch (err) {
-        console.error("Failed to create scan session:", err);
+  // Initialize or rotate scan session
+  const createSession = useCallback(async () => {
+    setSessionLoading(true);
+    setSessionError("");
+    setQrUrl("");
+    try {
+      const res = await fetch("/api/scan-session", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data.id) {
+        throw new Error(data.error || "Failed to initialize mobile session");
       }
-    };
-    createSession();
+      setSessionId(data.id);
+      if (data.token) setPairingToken(data.token);
+      setTimeLeft(900);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to create scan session";
+      console.error("[scanner] Session creation failed:", err);
+      setSessionError(msg);
+    } finally {
+      setSessionLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    createSession();
+  }, [createSession]);
 
   // OCR results
   const [ocrText, setOcrText] = useState<string>("");
@@ -138,10 +155,30 @@ export default function ScannerPage() {
       }
       if (isCancelled) return;
       const uploadUrl = `${baseOrigin}/scan-upload?id=${sessionId}&token=${pairingToken}`;
+      setMobileUploadUrl(uploadUrl);
       console.log("[scanner] QR URL:", uploadUrl);
-      setQrUrl(
-        `https://api.qrserver.com/v1/create-qr-code/?size=250x250&ecc=H&margin=2&data=${encodeURIComponent(uploadUrl)}`
-      );
+
+      try {
+        const dataUrl = await QRCode.toDataURL(uploadUrl, {
+          width: 250,
+          margin: 1,
+          color: {
+            dark: "#000000",
+            light: "#ffffff",
+          },
+          errorCorrectionLevel: "H",
+        });
+        if (!isCancelled) {
+          setQrUrl(dataUrl);
+        }
+      } catch (qrErr) {
+        console.error("[scanner] Local QR generation error, using fallback:", qrErr);
+        if (!isCancelled) {
+          setQrUrl(
+            `https://api.qrserver.com/v1/create-qr-code/?size=250x250&ecc=H&margin=2&data=${encodeURIComponent(uploadUrl)}`
+          );
+        }
+      }
     };
 
     resolveQrUrl();
@@ -157,19 +194,12 @@ export default function ScannerPage() {
     const tick = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
-          // Timer hit zero: rotate session
           clearInterval(tick);
           // Invalidate old session securely with pairing token, then create fresh one
           if (sessionId && pairingToken) {
             fetch(`/api/scan-session?id=${sessionId}&token=${pairingToken}`, { method: "DELETE" }).catch(() => {});
           }
-          fetch("/api/scan-session", { method: "POST" })
-            .then((res) => res.json())
-            .then((data) => {
-              if (data.id) setSessionId(data.id);
-              if (data.token) setPairingToken(data.token);
-            })
-            .catch((err) => console.error("Failed to refresh scan session:", err));
+          createSession();
           return 0;
         }
         return prev - 1;
@@ -177,7 +207,7 @@ export default function ScannerPage() {
     }, 1000);
 
     return () => clearInterval(tick);
-  }, [sessionId, pairingToken]);
+  }, [sessionId, pairingToken, createSession]);
 
   // --- Clean up object URL on unmount / new file ---------------------------
   useEffect(() => {
@@ -823,29 +853,90 @@ export default function ScannerPage() {
               <span className="material-symbols-outlined">qr_code_scanner</span>
             </div>
             <h3 className="font-headline-sm text-headline-sm font-semibold text-on-surface mb-2">Scan with Mobile</h3>
-            <p className="font-body-sm text-body-sm text-on-surface-variant mb-6">
+            <p className="font-body-sm text-body-sm text-on-surface-variant mb-4">
               Point your phone camera here to securely upload receipts directly from your device.
             </p>
-            <div className="bg-white p-2 rounded-lg mb-4 shadow-sm w-[250px] h-[250px] mx-auto flex items-center justify-center">
-              {qrUrl ? (
-                <Image
+
+            <div className="bg-white p-2 rounded-xl mb-4 shadow-sm w-[252px] h-[252px] mx-auto flex items-center justify-center relative overflow-hidden border border-outline-variant/30">
+              {sessionLoading ? (
+                <div className="flex flex-col items-center justify-center gap-2 p-4 text-center">
+                  <div className="w-8 h-8 border-3 border-primary border-t-transparent rounded-full animate-spin" />
+                  <span className="text-xs font-medium text-slate-600">Generating secure QR code...</span>
+                </div>
+              ) : sessionError ? (
+                <div className="flex flex-col items-center justify-center gap-2 p-4 text-center">
+                  <span className="material-symbols-outlined text-error text-3xl">error_outline</span>
+                  <p className="text-xs text-error font-medium leading-tight">{sessionError}</p>
+                  <button
+                    type="button"
+                    onClick={createSession}
+                    className="mt-2 px-3 py-1 bg-primary text-white text-xs font-semibold rounded-lg hover:opacity-90 transition"
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : qrUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
                   src={qrUrl}
                   alt="QR Code to upload receipt from mobile"
-                  width={234}
-                  height={234}
-                  unoptimized
+                  width={240}
+                  height={240}
                   className="w-full h-full object-contain"
                 />
               ) : (
                 <div className="w-full h-full bg-surface-container-high animate-pulse rounded" />
               )}
             </div>
-            <p className="font-label-sm text-label-sm text-on-surface-variant">
-              Session valid for{" "}
-              <span className={timeLeft <= 60 ? "text-error font-semibold" : ""}>
-                {String(Math.floor(timeLeft / 60)).padStart(2, "0")}:{String(timeLeft % 60).padStart(2, "0")}
+
+            <div className="flex items-center justify-between w-full max-w-[250px] mb-3">
+              <span className="font-label-sm text-label-sm text-on-surface-variant">
+                Expires in{" "}
+                <span className={timeLeft <= 60 ? "text-error font-semibold" : "font-semibold"}>
+                  {String(Math.floor(timeLeft / 60)).padStart(2, "0")}:{String(timeLeft % 60).padStart(2, "0")}
+                </span>
               </span>
-            </p>
+              <button
+                type="button"
+                onClick={createSession}
+                className="text-xs text-primary hover:underline flex items-center gap-1 font-medium"
+                title="Refresh session and QR code"
+              >
+                <span className="material-symbols-outlined text-sm">refresh</span>
+                <span>Refresh</span>
+              </button>
+            </div>
+
+            {/* Clickable direct link fallback */}
+            {mobileUploadUrl && (
+              <div className="w-full max-w-[250px] pt-3 border-t border-outline-variant/20 flex flex-col gap-2">
+                <a
+                  href={mobileUploadUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-medium text-primary hover:underline flex items-center justify-center gap-1.5"
+                >
+                  <span className="material-symbols-outlined text-sm">open_in_new</span>
+                  <span>Open mobile upload link</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (navigator.clipboard) {
+                      navigator.clipboard.writeText(mobileUploadUrl);
+                      setCopiedLink(true);
+                      setTimeout(() => setCopiedLink(false), 2000);
+                    }
+                  }}
+                  className="text-[11px] text-on-surface-variant hover:text-on-surface flex items-center justify-center gap-1 transition"
+                >
+                  <span className="material-symbols-outlined text-xs">
+                    {copiedLink ? "check" : "content_copy"}
+                  </span>
+                  <span>{copiedLink ? "Link copied to clipboard!" : "Copy mobile link"}</span>
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Tips */}
