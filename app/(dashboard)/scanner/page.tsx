@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
 import { useLanguage } from "@/components/LanguageProvider";
@@ -90,8 +89,27 @@ export default function ScannerPage() {
   }, []);
 
   useEffect(() => {
-    createSession();
-  }, [createSession]);
+    let cancelled = false;
+    const init = async () => {
+      try {
+        const res = await fetch("/api/scan-session", { method: "POST" });
+        const data = await res.json();
+        if (!cancelled && data.id) {
+          setSessionId(data.id);
+          if (data.token) setPairingToken(data.token);
+          setTimeLeft(900);
+        }
+      } catch (err: unknown) {
+        console.error("[scanner] Initial session error:", err);
+      } finally {
+        if (!cancelled) setSessionLoading(false);
+      }
+    };
+    init();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // OCR results
   const [ocrText, setOcrText] = useState<string>("");

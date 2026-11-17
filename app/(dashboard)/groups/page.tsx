@@ -3,6 +3,16 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { createClient } from "@/utils/supabase/client";
 import { useLanguage } from "@/components/LanguageProvider";
+import {
+  calculateEqualSplits,
+  computeGroupBalances,
+  simplifyDebts,
+  MemberBalanceDetail,
+  SettlementTransfer,
+  GroupMemberInput,
+  GroupExpenseInput,
+  GroupSettlementInput,
+} from "@/lib/group-calculations";
 
 interface GroupItem {
   id: string;
@@ -21,21 +31,17 @@ interface GroupExpenseItem {
   paidBy: string;
   amount: number;
   isYou: boolean;
+  splits?: { profile_id: string; share_amount: number }[];
 }
 
-interface MemberBalance {
-  profileId: string;
-  name: string;
-  paid: number;
-  balance: number;
-}
-
-interface SettlementTransfer {
-  fromId: string;
-  fromName: string;
-  toId: string;
-  toName: string;
-  amount: number;
+interface RawGroupExpense {
+  id: string;
+  payer_id: string;
+  amount: number | string;
+  description: string;
+  date: string;
+  profiles?: { full_name?: string } | null;
+  group_expense_splits?: { profile_id: string; share_amount: number | string }[];
 }
 
 // Stable logical settlement operation manager across page refreshes and network retries
@@ -91,7 +97,9 @@ export default function GroupsPage() {
   const [activeGroup, setActiveGroup] = useState<string>("");
   const [groups, setGroups] = useState<GroupItem[]>([]);
   const [expenses, setExpenses] = useState<GroupExpenseItem[]>([]);
-  const [balances, setBalances] = useState<MemberBalance[]>([]);
+  const [balances, setBalances] = useState<MemberBalanceDetail[]>([]);
+  const [groupMembers, setGroupMembers] = useState<GroupMemberInput[]>([]);
+  const [, setSettlements] = useState<GroupSettlementInput[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -102,6 +110,8 @@ export default function GroupsPage() {
   const [showAddExpenseModal, setShowAddExpenseModal] = useState(false);
   const [newExpenseDesc, setNewExpenseDesc] = useState("");
   const [newExpenseAmount, setNewExpenseAmount] = useState("");
+  const [newExpensePayerId, setNewExpensePayerId] = useState<string>("");
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
   const [showAddMemberModal, setShowAddMemberModal] = useState(false);
   const [newMemberEmail, setNewMemberEmail] = useState("");
   const [showSettlementModal, setShowSettlementModal] = useState(false);
@@ -186,68 +196,115 @@ export default function GroupsPage() {
     if (!activeGroup || !userId) return;
     const supabase = createClient();
     try {
-      const { data: exps, error: expsError } = await supabase
-        .from("group_expenses")
-        .select("*, profiles(full_name)")
-        .eq("group_id", activeGroup)
-        .order("date", { ascending: false });
-
-      if (expsError) {
-        console.error("[Groups] group_expenses fetch error:", expsError);
-        setError("Failed to fetch expenses.");
-        return;
-      }
-
+      // 1. Fetch group members
       const { data: membersData, error: memError } = await supabase
         .from("group_members")
         .select("profile_id, profiles(full_name)")
         .eq("group_id", activeGroup);
 
-      if (exps) {
-        setExpenses(
-          exps.map((e) => ({
-            id: e.id,
-            date: new Date(e.date).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-            description: e.description,
-            paidBy: (e.profiles as { full_name?: string })?.full_name || "Unknown",
-            amount: Number(e.amount),
-            isYou: e.payer_id === userId,
-          }))
-        );
+      if (memError) {
+        console.error("[Groups] group_members fetch error:", memError);
+        setError("Failed to fetch group members.");
+        return;
       }
 
-      if (!memError && membersData) {
-        const totalMembers = membersData.length;
-        let totalSpent = 0;
-        const paidByProfile: Record<string, number> = {};
+      const activeMembers: GroupMemberInput[] = (membersData || []).map((m) => ({
+        profileId: m.profile_id,
+        name: (m.profiles as { full_name?: string })?.full_name || "Member",
+      }));
+      setGroupMembers(activeMembers);
 
-        membersData.forEach((m) => {
-          paidByProfile[m.profile_id] = 0;
-        });
+      // Default selected participants and payer if unset
+      setSelectedParticipantIds((prev) =>
+        prev.length === 0 ? activeMembers.map((m) => m.profileId) : prev
+      );
+      setNewExpensePayerId((prev) => (!prev ? userId : prev));
 
-        (exps || []).forEach((e) => {
-          const amt = Number(e.amount);
-          totalSpent += amt;
-          paidByProfile[e.payer_id] = (paidByProfile[e.payer_id] || 0) + amt;
-        });
+      // 2. Fetch group expenses (attempt with group_expense_splits relation)
+      let rawExps: RawGroupExpense[] = [];
+      try {
+        const { data: expsWithSplits, error: splitsErr } = await supabase
+          .from("group_expenses")
+          .select("*, profiles(full_name), group_expense_splits(profile_id, share_amount)")
+          .eq("group_id", activeGroup)
+          .order("date", { ascending: false });
 
-        const equalShare = totalMembers > 0 ? totalSpent / totalMembers : 0;
-
-        const newBalances: MemberBalance[] = membersData.map((m) => {
-          const paid = paidByProfile[m.profile_id] || 0;
-          const bal = paid - equalShare;
-          return {
-            profileId: m.profile_id,
-            name: (m.profiles as { full_name?: string })?.full_name || "Member",
-            paid: paid,
-            balance: Math.round(bal * 100) / 100,
-          };
-        });
-
-        setBalances(newBalances);
-      } else {
-        setBalances([]);
+        if (!splitsErr && expsWithSplits) {
+          rawExps = expsWithSplits;
+        } else {
+          const { data: basicExps, error: basicErr } = await supabase
+            .from("group_expenses")
+            .select("*, profiles(full_name)")
+            .eq("group_id", activeGroup)
+            .order("date", { ascending: false });
+          if (!basicErr && basicExps) rawExps = basicExps;
+        }
+      } catch {
+        const { data: basicExps } = await supabase
+          .from("group_expenses")
+          .select("*, profiles(full_name)")
+          .eq("group_id", activeGroup)
+          .order("date", { ascending: false });
+        if (basicExps) rawExps = basicExps;
       }
+
+      // Filter out legacy dummy balancing entries from user-facing expense lists
+      const filteredExps = (rawExps || []).filter(
+        (e) => Number(e.amount) > 0 && !e.description?.toLowerCase().includes("all balances settled")
+      );
+
+      setExpenses(
+        filteredExps.map((e) => ({
+          id: e.id,
+          date: new Date(e.date).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+          description: e.description || "Expense",
+          paidBy: (e.profiles as { full_name?: string })?.full_name || "Unknown",
+          amount: Number(e.amount),
+          isYou: e.payer_id === userId,
+          splits: e.group_expense_splits?.map((s) => ({
+            profile_id: s.profile_id,
+            share_amount: Number(s.share_amount),
+          })),
+        }))
+      );
+
+      // 3. Fetch group settlements
+      let settlementsData: GroupSettlementInput[] = [];
+      try {
+        const { data: sets, error: setsErr } = await supabase
+          .from("group_settlements")
+          .select("id, from_profile_id, to_profile_id, amount, settled_at")
+          .eq("group_id", activeGroup);
+
+        if (!setsErr && sets) {
+          settlementsData = sets.map((s) => ({
+            id: s.id,
+            from_profile_id: s.from_profile_id,
+            to_profile_id: s.to_profile_id,
+            amount: Number(s.amount),
+            settled_at: s.settled_at,
+          }));
+        }
+      } catch {
+        // settlements table not queried or empty
+      }
+      setSettlements(settlementsData);
+
+      // 4. Compute accurate net balances using integer-paise Splitwise algorithm
+      const expenseInputs: GroupExpenseInput[] = (rawExps || []).map((e) => ({
+        id: e.id,
+        payer_id: e.payer_id,
+        amount: Number(e.amount),
+        description: e.description,
+        date: e.date,
+        splits: e.group_expense_splits?.map((s: { profile_id: string; share_amount: number | string }) => ({
+          profile_id: s.profile_id,
+          share_amount: Number(s.share_amount),
+        })),
+      }));
+
+      const computedBalances = computeGroupBalances(activeMembers, expenseInputs, settlementsData);
+      setBalances(computedBalances);
     } catch (err) {
       console.error("[Groups] Error fetching expenses:", err);
     }
@@ -275,47 +332,30 @@ export default function GroupsPage() {
     };
   }, [fetchExpenses]);
 
-  // Compute transfers needed to settle all balances
+  // Compute transfers needed to settle all balances using integer paise debt simplification
   const settlementTransfers: SettlementTransfer[] = useMemo(() => {
-    const debtors: { id: string; name: string; amount: number }[] = [];
-    const creditors: { id: string; name: string; amount: number }[] = [];
-
-    balances.forEach((b) => {
-      if (b.balance < -0.01) {
-        debtors.push({ id: b.profileId, name: b.name, amount: Math.abs(b.balance) });
-      } else if (b.balance > 0.01) {
-        creditors.push({ id: b.profileId, name: b.name, amount: b.balance });
-      }
-    });
-
-    const transfers: SettlementTransfer[] = [];
-    let dIdx = 0;
-    let cIdx = 0;
-
-    while (dIdx < debtors.length && cIdx < creditors.length) {
-      const debtor = debtors[dIdx];
-      const creditor = creditors[cIdx];
-      const settleAmount = Math.min(debtor.amount, creditor.amount);
-
-      if (settleAmount > 0.01) {
-        transfers.push({
-          fromId: debtor.id,
-          fromName: debtor.name,
-          toId: creditor.id,
-          toName: creditor.name,
-          amount: Math.round(settleAmount * 100) / 100,
-        });
-      }
-
-      debtor.amount -= settleAmount;
-      creditor.amount -= settleAmount;
-
-      if (debtor.amount <= 0.01) dIdx++;
-      if (creditor.amount <= 0.01) cIdx++;
-    }
-
-    return transfers;
+    return simplifyDebts(balances);
   }, [balances]);
+
+  const toggleParticipant = (profileId: string) => {
+    setSelectedParticipantIds((prev) => {
+      if (prev.includes(profileId)) {
+        if (prev.length <= 1) return prev; // keep at least 1
+        return prev.filter((id) => id !== profileId);
+      }
+      return [...prev, profileId];
+    });
+  };
+
+  const selectAllParticipants = () => {
+    setSelectedParticipantIds(groupMembers.map((m) => m.profileId));
+  };
+
+  const currentExpenseAmount = parseFloat(newExpenseAmount) || 0;
+  const currentSplits = useMemo(() => {
+    if (currentExpenseAmount <= 0 || selectedParticipantIds.length === 0) return [];
+    return calculateEqualSplits(currentExpenseAmount, selectedParticipantIds);
+  }, [currentExpenseAmount, selectedParticipantIds]);
 
   const handleCreateGroup = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -365,25 +405,80 @@ export default function GroupsPage() {
     const amount = parseFloat(newExpenseAmount);
     if (isNaN(amount) || amount <= 0) return;
 
-    const supabase = createClient();
-    const { error: insertError } = await supabase.from("group_expenses").insert([
-      {
-        group_id: activeGroup,
-        payer_id: userId,
-        description: newExpenseDesc.trim(),
-        amount: amount,
-        date: new Date().toISOString().split("T")[0],
-      },
-    ]);
+    const payer = newExpensePayerId || userId;
+    const participants =
+      selectedParticipantIds.length > 0
+        ? selectedParticipantIds
+        : groupMembers.map((m) => m.profileId);
 
-    if (insertError) {
-      alert("Failed to add expense: " + insertError.message);
-      return;
+    // Calculate exact equal shares in integer paise
+    const splits = calculateEqualSplits(amount, participants);
+
+    const supabase = createClient();
+    const today = new Date().toISOString().split("T")[0];
+
+    // 1. Try atomic RPC function
+    let rpcSuccess = false;
+    try {
+      const { data: rpcData, error: rpcErr } = await supabase.rpc("rpc_create_group_expense", {
+        p_group_id: activeGroup,
+        p_payer_id: payer,
+        p_description: newExpenseDesc.trim(),
+        p_amount: amount,
+        p_date: today,
+        p_splits: splits.map((s) => ({
+          profile_id: s.profileId,
+          share_amount: s.shareAmount,
+        })),
+      });
+      if (!rpcErr && rpcData?.success) {
+        rpcSuccess = true;
+      }
+    } catch {
+      // RPC not yet deployed or error, fall back to direct insert
+    }
+
+    if (!rpcSuccess) {
+      // 2. Direct insert fallback
+      const { data: newExp, error: insertError } = await supabase
+        .from("group_expenses")
+        .insert([
+          {
+            group_id: activeGroup,
+            payer_id: payer,
+            description: newExpenseDesc.trim(),
+            amount: amount,
+            date: today,
+          },
+        ])
+        .select("id")
+        .single();
+
+      if (insertError) {
+        alert("Failed to add expense: " + insertError.message);
+        return;
+      }
+
+      if (newExp?.id && splits.length > 0) {
+        try {
+          await supabase.from("group_expense_splits").insert(
+            splits.map((s) => ({
+              group_expense_id: newExp.id,
+              profile_id: s.profileId,
+              share_amount: s.shareAmount,
+            }))
+          );
+        } catch {
+          // Table may not yet be present; fallback will dynamically divide on read
+        }
+      }
     }
 
     setShowAddExpenseModal(false);
     setNewExpenseDesc("");
     setNewExpenseAmount("");
+    setNewExpensePayerId(userId);
+    setSelectedParticipantIds(groupMembers.map((m) => m.profileId));
     fetchExpenses();
   };
 
@@ -478,7 +573,6 @@ export default function GroupsPage() {
         const supabase = createClient();
         const activeGroupObj = groups.find((g) => g.id === activeGroup);
         const isCreator = activeGroupObj?.created_by === userId;
-        const today = new Date().toISOString().split("T")[0];
 
         let insertErrors = 0;
         for (const t of settlementTransfers) {
@@ -504,16 +598,6 @@ export default function GroupsPage() {
         }
 
         if (insertErrors === 0) {
-          await supabase.from("group_expenses").insert([
-            {
-              group_id: activeGroup,
-              payer_id: userId,
-              description: "All balances settled",
-              amount: 0,
-              date: today,
-            },
-          ]);
-
           // Clear pending operation ONLY after confirmed persistence
           clearSettlementOperationId(activeGroup);
           setSettlementSuccessMsg("All balances have been acknowledged as settled.");
@@ -639,7 +723,7 @@ export default function GroupsPage() {
                 {t("groups_settlement_title") || "Settlement"}
               </h3>
             </div>
-            <div className="space-y-unit-md">
+            <div className="space-y-3">
               {!activeGroup && (
                 <div className="text-sm text-on-surface-variant">
                   {t("groups_select_to_view") || "Select a group to view settlements."}
@@ -651,47 +735,96 @@ export default function GroupsPage() {
                 </div>
               )}
               {balances.map((b) => (
-                <div key={b.profileId} className="flex justify-between items-center">
+                <div
+                  key={b.profileId}
+                  className="p-3 rounded-lg bg-surface-container-low/60 border border-outline-variant/20 flex justify-between items-center"
+                >
                   <div className="flex items-center space-x-unit-sm">
                     <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-[12px] ${
-                        b.balance >= 0
-                          ? "bg-secondary-container text-on-secondary-container"
-                          : "bg-error/10 text-error"
+                      className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-[12px] ${
+                        b.netBalance > 0.009
+                          ? "bg-emerald-500/15 text-emerald-600"
+                          : b.netBalance < -0.009
+                          ? "bg-rose-500/15 text-rose-600"
+                          : "bg-surface-variant text-on-surface-variant"
                       }`}
                     >
                       {b.name.substring(0, 2).toUpperCase()}
                     </div>
                     <div className="flex flex-col">
-                      <span className="font-body-sm text-[14px] text-on-surface font-medium">
+                      <span className="font-body-sm text-[14px] text-on-surface font-semibold flex items-center gap-1">
                         {b.name} {b.profileId === userId ? "(You)" : ""}
                       </span>
-                      <span className="font-label-sm text-[11px] text-on-surface-variant">
-                        Total Paid: {formatCurrency(b.paid)}
-                      </span>
+                      <div className="flex items-center gap-2 text-[11px] text-on-surface-variant">
+                        <span>Paid: <strong className="text-on-surface">{formatCurrency(b.totalPaid)}</strong></span>
+                        <span>•</span>
+                        <span>Share: <strong className="text-on-surface">{formatCurrency(b.totalShare)}</strong></span>
+                      </div>
                     </div>
                   </div>
-                  <span
-                    className={`font-label-md text-[14px] font-semibold ${
-                      b.balance >= 0 ? "text-primary" : "text-error"
-                    }`}
-                  >
-                    {b.balance >= 0 ? "+" : "-"}{formatCurrency(Math.abs(b.balance))}
-                  </span>
+
+                  <div className="flex flex-col items-end">
+                    <span
+                      className={`font-label-md text-[14px] font-bold ${
+                        b.netBalance > 0.009
+                          ? "text-emerald-600"
+                          : b.netBalance < -0.009
+                          ? "text-rose-600"
+                          : "text-on-surface-variant"
+                      }`}
+                    >
+                      {b.netBalance > 0.009 ? "+" : b.netBalance < -0.009 ? "-" : ""}
+                      {formatCurrency(Math.abs(b.netBalance))}
+                    </span>
+                    <span className="text-[10px] font-medium uppercase tracking-wider text-on-surface-variant">
+                      {b.netBalance > 0.009
+                        ? "Gets back"
+                        : b.netBalance < -0.009
+                        ? "Owes"
+                        : "Settled up"}
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>
+
+            {/* Outstanding Debts Breakdown */}
+            {activeGroup && settlementTransfers.length > 0 && (
+              <div className="mt-4 p-3 rounded-lg bg-surface-container border border-outline-variant/30 text-xs space-y-1.5">
+                <span className="font-bold text-on-surface uppercase text-[10px] tracking-wider block mb-1">
+                  Outstanding Debts:
+                </span>
+                {settlementTransfers.map((t, idx) => (
+                  <div key={idx} className="flex items-center justify-between text-on-surface-variant">
+                    <div className="flex items-center gap-1.5">
+                      <strong className="text-on-surface">{t.fromName}</strong>
+                      <span>owes</span>
+                      <strong className="text-on-surface">{t.toName}</strong>
+                    </div>
+                    <span className="font-bold text-primary">{formatCurrency(t.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {activeGroup && balances.length > 0 && (
               <button
+                disabled={settlementTransfers.length === 0}
                 onClick={() => {
                   const opId = getOrCreateSettlementOperationId(activeGroup, settlementTransfers);
                   setSettlementBatchId(opId);
                   setShowSettlementModal(true);
                 }}
-                className="w-full mt-unit-lg py-2.5 border border-primary text-primary hover:bg-primary/10 font-label-md text-[14px] rounded-lg transition-colors cursor-pointer font-semibold flex items-center justify-center gap-2"
+                className={`w-full mt-unit-lg py-2.5 font-label-md text-[14px] rounded-lg transition-colors font-semibold flex items-center justify-center gap-2 ${
+                  settlementTransfers.length === 0
+                    ? "bg-surface-container text-on-surface-variant/50 cursor-not-allowed border border-outline-variant/20"
+                    : "border border-primary text-primary hover:bg-primary/10 cursor-pointer shadow-xs"
+                }`}
               >
                 <span className="material-symbols-outlined text-[18px]">handshake</span>
-                {t("groups_settle_btn") || "Settle All Balances"}
+                {settlementTransfers.length === 0
+                  ? "All Balances Settled"
+                  : t("groups_settle_btn") || "Settle All Balances"}
               </button>
             )}
           </div>
@@ -777,8 +910,11 @@ export default function GroupsPage() {
                       <div className="font-body-md text-[15px] font-medium text-on-surface">
                         {expense.description}
                       </div>
-                      <div className="font-label-sm text-[12px] text-on-surface-variant sm:hidden">
-                        Paid by {expense.paidBy}
+                      <div className="font-label-sm text-[12px] text-on-surface-variant flex items-center gap-1.5 mt-0.5 flex-wrap">
+                        <span className="sm:hidden">Paid by {expense.paidBy} •</span>
+                        <span className="inline-flex items-center text-[11px] text-primary bg-primary/10 px-1.5 py-0.2 rounded font-medium">
+                          Equal Split ({formatCurrency(expense.amount / (expense.splits?.length || groupMembers.length || 1))}/person)
+                        </span>
                       </div>
                     </td>
                     <td className="py-unit-md hidden sm:table-cell">
@@ -943,16 +1079,27 @@ export default function GroupsPage() {
       {/* Add Expense Modal */}
       {showAddExpenseModal && (
         <div className="fixed inset-0 bg-on-background/25 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-surface rounded-xl shadow-2xl p-unit-xl relative border border-outline-variant/30 luminous-border">
+          <div className="w-full max-w-lg bg-surface rounded-xl shadow-2xl p-unit-xl relative border border-outline-variant/30 luminous-border">
             <button
               onClick={() => setShowAddExpenseModal(false)}
               className="absolute top-4 right-4 text-on-surface-variant hover:text-on-surface focus:outline-none cursor-pointer"
             >
               <span className="material-symbols-outlined">close</span>
             </button>
-            <h3 className="font-headline-sm text-headline-sm text-on-surface font-bold mb-4">
-              {t("expenses_modal_add_title") || "Add Group Expense"}
-            </h3>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary">
+                <span className="material-symbols-outlined text-[24px]">receipt_long</span>
+              </div>
+              <div>
+                <h3 className="font-headline-sm text-headline-sm text-on-surface font-bold">
+                  {t("expenses_modal_add_title") || "Add Group Expense"}
+                </h3>
+                <p className="font-body-sm text-xs text-on-surface-variant">
+                  Shared cost split equally among group members
+                </p>
+              </div>
+            </div>
+
             <form onSubmit={handleAddExpense} className="space-y-4">
               <div>
                 <label className="block font-label-md text-label-md text-on-surface mb-1" htmlFor="expDesc">
@@ -968,24 +1115,108 @@ export default function GroupsPage() {
                   onChange={(e) => setNewExpenseDesc(e.target.value)}
                 />
               </div>
-              <div>
-                <label className="block font-label-md text-label-md text-on-surface mb-1" htmlFor="expAmount">
-                  {t("expenses_modal_amount_label") || "Amount (₹)"}
-                </label>
-                <input
-                  required
-                  id="expAmount"
-                  type="number"
-                  step="0.01"
-                  placeholder="e.g. 1500"
-                  className="w-full px-3 py-2 border border-outline-variant rounded-lg bg-surface-container-lowest text-on-surface focus:outline-none focus:ring-2 focus:ring-primary-container focus:border-transparent font-body-sm text-body-sm"
-                  value={newExpenseAmount}
-                  onChange={(e) => setNewExpenseAmount(e.target.value)}
-                />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-label-md text-label-md text-on-surface mb-1" htmlFor="expAmount">
+                    {t("expenses_modal_amount_label") || "Total Amount (₹)"}
+                  </label>
+                  <input
+                    required
+                    id="expAmount"
+                    type="number"
+                    step="0.01"
+                    placeholder="e.g. 1000"
+                    className="w-full px-3 py-2 border border-outline-variant rounded-lg bg-surface-container-lowest text-on-surface focus:outline-none focus:ring-2 focus:ring-primary-container focus:border-transparent font-body-sm text-body-sm"
+                    value={newExpenseAmount}
+                    onChange={(e) => setNewExpenseAmount(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-label-md text-label-md text-on-surface mb-1" htmlFor="expPayer">
+                    Paid By
+                  </label>
+                  <select
+                    id="expPayer"
+                    className="w-full px-3 py-2 border border-outline-variant rounded-lg bg-surface-container-lowest text-on-surface focus:outline-none focus:ring-2 focus:ring-primary-container focus:border-transparent font-body-sm text-body-sm"
+                    value={newExpensePayerId || userId || ""}
+                    onChange={(e) => setNewExpensePayerId(e.target.value)}
+                  >
+                    {groupMembers.map((m) => (
+                      <option key={m.profileId} value={m.profileId}>
+                        {m.name} {m.profileId === userId ? "(You)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
+
+              {/* Real-time Split Breakdown */}
+              <div className="p-3.5 rounded-xl bg-surface-container-low border border-outline-variant/30 space-y-2.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-on-surface flex items-center gap-1.5">
+                    <span className="material-symbols-outlined text-primary text-[16px]">call_split</span>
+                    Split Equally ({selectedParticipantIds.length} of {groupMembers.length} members)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={selectAllParticipants}
+                    className="text-primary hover:underline text-[11px] font-medium"
+                  >
+                    Select All
+                  </button>
+                </div>
+
+                {/* Participant checkboxes with calculated share */}
+                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                  {groupMembers.map((m) => {
+                    const isChecked = selectedParticipantIds.includes(m.profileId);
+                    const share = currentSplits.find((s) => s.profileId === m.profileId);
+                    return (
+                      <label
+                        key={m.profileId}
+                        className="flex items-center justify-between p-2 rounded-lg bg-surface hover:bg-surface-container transition-colors cursor-pointer text-xs border border-outline-variant/20"
+                      >
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => toggleParticipant(m.profileId)}
+                            className="rounded text-primary focus:ring-primary w-4 h-4 cursor-pointer"
+                          />
+                          <span className="font-medium text-on-surface">
+                            {m.name} {m.profileId === userId ? "(You)" : ""}
+                          </span>
+                        </div>
+                        {isChecked && share ? (
+                          <span className="font-bold text-primary">{formatCurrency(share.shareAmount)}</span>
+                        ) : (
+                          <span className="text-[11px] text-on-surface-variant">Excluded</span>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+
+                {/* Clear summary of who owes what */}
+                {currentExpenseAmount > 0 && currentSplits.length > 0 && (
+                  <div className="pt-2 border-t border-outline-variant/20 text-[11px] text-on-surface-variant leading-relaxed">
+                    💡 Total <strong>{formatCurrency(currentExpenseAmount)}</strong> paid by{" "}
+                    <strong>
+                      {groupMembers.find((m) => m.profileId === (newExpensePayerId || userId))?.name || "Payer"}
+                    </strong>
+                    . Each participant&apos;s equal share is{" "}
+                    <strong>{formatCurrency(currentSplits[0].shareAmount)}</strong>. Other members owe{" "}
+                    <strong>{formatCurrency(currentSplits[0].shareAmount)}</strong> each.
+                  </div>
+                )}
+              </div>
+
               <button
                 type="submit"
-                className="w-full py-3 bg-primary text-on-primary font-label-md text-label-md rounded-lg shadow-sm hover:opacity-95 transition-opacity mt-4 font-bold cursor-pointer"
+                disabled={selectedParticipantIds.length === 0 || !newExpenseAmount || parseFloat(newExpenseAmount) <= 0}
+                className="w-full py-3 bg-primary text-on-primary font-label-md text-label-md rounded-lg shadow-sm hover:opacity-95 transition-opacity mt-4 font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {t("expenses_modal_save") || "Add Expense"}
               </button>

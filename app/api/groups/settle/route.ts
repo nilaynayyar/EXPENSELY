@@ -158,7 +158,6 @@ export async function POST(req: NextRequest) {
     }
 
     // 5. Insert Settlement Transfers (filter out any that were already committed)
-    const today = new Date().toISOString().split("T")[0];
     const recordsToInsert = boundTransfers
       .filter((bt) => !existingKeys.has(bt.idempotencyKey))
       .map((bt) => ({
@@ -192,21 +191,6 @@ export async function POST(req: NextRequest) {
       } catch {
         // In dev fallback, allow continuation
       }
-    }
-
-    // 6. Record balancing entry in group_expenses
-    try {
-      await client.from("group_expenses").insert([
-        {
-          group_id: groupId,
-          payer_id: currentUserId || transfers[0].fromId,
-          description: "All balances settled",
-          amount: 0,
-          date: today,
-        },
-      ]);
-    } catch {
-      // ignore balancing note errors
     }
 
     return NextResponse.json({
