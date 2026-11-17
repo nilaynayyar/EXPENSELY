@@ -117,11 +117,13 @@ $$ language plpgsql security definer;
 -- RLS Policies
 
 -- Profiles Policies
+drop policy if exists "Allow profile select for authenticated users" on public.profiles;
 create policy "Allow profile select for authenticated users"
   on public.profiles for select
   to authenticated
   using (true);
 
+drop policy if exists "Allow profile update for owners" on public.profiles;
 create policy "Allow profile update for owners"
   on public.profiles for update
   to authenticated
@@ -129,12 +131,14 @@ create policy "Allow profile update for owners"
   with check (auth.uid() = id);
 
 -- Categories Policies
+drop policy if exists "Allow categories select for authenticated users" on public.categories;
 create policy "Allow categories select for authenticated users"
   on public.categories for select
   to authenticated
   using (true);
 
 -- Expenses Policies
+drop policy if exists "Allow expenses access for owners" on public.expenses;
 create policy "Allow expenses access for owners"
   on public.expenses for all
   to authenticated
@@ -142,18 +146,21 @@ create policy "Allow expenses access for owners"
   with check (auth.uid() = user_id);
 
 -- Groups Policies
+drop policy if exists "Allow groups access for members" on public.groups;
 create policy "Allow groups access for members"
   on public.groups for all
   to authenticated
   using (public.is_group_member(id, auth.uid()))
   with check (public.is_group_member(id, auth.uid()));
 
+drop policy if exists "Allow group creation for authenticated users" on public.groups;
 create policy "Allow group creation for authenticated users"
   on public.groups for insert
   to authenticated
   with check (true);
 
 -- Group Members Policies
+drop policy if exists "Allow group members access for members" on public.group_members;
 create policy "Allow group members access for members"
   on public.group_members for all
   to authenticated
@@ -161,6 +168,7 @@ create policy "Allow group members access for members"
   with check (public.is_group_member(group_id, auth.uid()));
 
 -- Group Expenses Policies
+drop policy if exists "Allow group expenses access for members" on public.group_expenses;
 create policy "Allow group expenses access for members"
   on public.group_expenses for all
   to authenticated
@@ -168,6 +176,7 @@ create policy "Allow group expenses access for members"
   with check (public.is_group_member(group_id, auth.uid()));
 
 -- Budgets Policies
+drop policy if exists "Allow budgets access for owners" on public.budgets;
 create policy "Allow budgets access for owners"
   on public.budgets for all
   to authenticated
@@ -190,6 +199,7 @@ end;
 $$ language plpgsql security definer;
 
 -- Trigger execution
-create or replace trigger on_auth_user_created
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
