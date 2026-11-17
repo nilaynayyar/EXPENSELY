@@ -194,10 +194,10 @@ export async function POST(req: NextRequest) {
       expense: createdExpenseData,
       account: session.userId
         ? {
-            id: session.userId,
-            email: session.userEmail,
-            name: session.userName,
-          }
+          id: session.userId,
+          email: session.userEmail,
+          name: session.userName,
+        }
         : null,
     });
   } catch (err: unknown) {
