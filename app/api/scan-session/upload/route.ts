@@ -21,8 +21,8 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
-    const id = formData.get("id") as string;
-    const token = (formData.get("token") as string) || req.nextUrl.searchParams.get("token") || "";
+    const id = (formData.get("id") || formData.get("sessionId")) as string;
+    const token = ((formData.get("token") || formData.get("pairingToken") || req.nextUrl.searchParams.get("token")) as string) || "";
     const file = formData.get("file") as File;
 
     if (!id || !isValidUUID(id)) {
