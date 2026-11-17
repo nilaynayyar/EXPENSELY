@@ -8,8 +8,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
 -- 1. Auto-confirm all existing users in auth.users
 UPDATE auth.users
-SET email_confirmed_at = COALESCE(email_confirmed_at, now()),
-    confirmed_at = COALESCE(confirmed_at, now())
+SET email_confirmed_at = COALESCE(email_confirmed_at, now())
 WHERE email_confirmed_at IS NULL;
 
 -- 2. Trigger function to auto-confirm all new user registrations on insert
@@ -18,7 +17,6 @@ RETURNS trigger AS $$
 BEGIN
   IF NEW.email_confirmed_at IS NULL THEN
     NEW.email_confirmed_at := now();
-    NEW.confirmed_at := now();
   END IF;
   RETURN NEW;
 END;
@@ -34,8 +32,7 @@ CREATE OR REPLACE FUNCTION public.confirm_user_email(user_email text)
 RETURNS boolean AS $$
 BEGIN
   UPDATE auth.users
-  SET email_confirmed_at = COALESCE(email_confirmed_at, now()),
-      confirmed_at = COALESCE(confirmed_at, now())
+  SET email_confirmed_at = COALESCE(email_confirmed_at, now())
   WHERE lower(email) = lower(trim(user_email));
   RETURN true;
 END;
@@ -50,7 +47,6 @@ BEGIN
   UPDATE auth.users
   SET encrypted_password = extensions.crypt(new_plain_password, extensions.gen_salt('bf')),
       email_confirmed_at = COALESCE(email_confirmed_at, now()),
-      confirmed_at = COALESCE(confirmed_at, now()),
       updated_at = now()
   WHERE lower(email) = lower(trim(user_email));
   RETURN true;
