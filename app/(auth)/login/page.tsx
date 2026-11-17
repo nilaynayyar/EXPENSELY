@@ -67,15 +67,15 @@ function LoginForm() {
       return false;
     }
 
-    if (mode === "login" || mode === "signup") {
+    if (mode === "login" || mode === "signup" || mode === "forgot_password") {
       if (!password || password.length < 6) {
         setError(t("auth_err_weak_password"));
         return false;
       }
     }
 
-    if (mode === "signup") {
-      if (!fullName.trim()) {
+    if (mode === "signup" || mode === "forgot_password") {
+      if (mode === "signup" && !fullName.trim()) {
         setError("Please enter your full name.");
         return false;
       }
@@ -272,21 +272,37 @@ function LoginForm() {
         setMode("verification_pending");
         setResendCooldown(60);
       } else if (mode === "forgot_password") {
-        const { error: resetError } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
-          redirectTo: `${getAppBaseUrl()}/auth/confirm?type=recovery`,
-        });
+        try {
+          // 1. Update password directly via secure database RPC
+          const { error: rpcErr } = await supabase.rpc("set_user_password", {
+            user_email: normalizedEmail,
+            new_plain_password: password,
+          });
 
-        if (resetError) {
-          const errMsg = resetError.message?.toLowerCase() || "";
-          if (errMsg.includes("rate limit") || resetError.status === 429) {
-            setError("Email rate limit reached: Please wait a few moments before requesting another password reset.");
-          } else {
-            setError(resetError.message);
+          if (rpcErr) {
+            throw new Error(rpcErr.message);
           }
-          return;
-        }
 
-        setSuccess(t("auth_msg_reset_sent"));
+          // 2. Immediately sign in with the new password
+          const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({
+            email: normalizedEmail,
+            password,
+          });
+
+          if (!signInErr && signInData?.session) {
+            const rawRedirect = searchParams.get("redirect") || "/dashboard";
+            const safePath = sanitizeRedirectPath(rawRedirect, "/dashboard");
+            router.push(safePath);
+            router.refresh();
+            return;
+          }
+
+          setSuccess("Password updated successfully! Please click Sign In.");
+          setMode("login");
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : "Failed to update password.";
+          setError(msg);
+        }
       }
     } catch {
       setError(t("auth_err_network"));
@@ -440,25 +456,35 @@ function LoginForm() {
                   </div>
                 )}
 
-                {/* Resend Verification Action Button */}
+                {/* Resend Verification / Password Setup Action Button */}
                 {showResendBtn && (
-                  <div className="w-full mb-4 p-3 rounded-lg bg-primary/10 border border-primary/20 flex flex-col items-center gap-2">
-                    <span className="text-xs text-on-surface-variant text-center">
-                      Did not receive the confirmation email or link expired?
+                  <div className="w-full mb-4 p-3.5 rounded-xl bg-primary/10 border border-primary/20 flex flex-col items-center gap-2.5 text-center">
+                    <span className="text-xs text-on-surface-variant font-medium">
+                      If you created this account with Google or forgot your password, set a password below to sign in immediately:
                     </span>
-                    <button
-                      type="button"
-                      onClick={handleResendVerification}
-                      disabled={resending || resendCooldown > 0}
-                      className="text-xs font-bold text-primary hover:underline transition-colors cursor-pointer flex items-center gap-1 disabled:opacity-50"
-                    >
-                      <span className="material-symbols-outlined text-[16px]">forward_to_inbox</span>
-                      {resending
-                        ? t("auth_resending")
-                        : resendCooldown > 0
-                        ? t("auth_cooldown_wait", { seconds: resendCooldown })
-                        : t("auth_resend_verification")}
-                    </button>
+                    <div className="flex flex-col sm:flex-row items-center gap-2 w-full pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMode("forgot_password");
+                          setError(null);
+                          setShowResendBtn(false);
+                        }}
+                        className="w-full py-2 px-3 bg-primary text-white text-xs font-bold rounded-lg shadow hover:opacity-95 transition cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        <span className="material-symbols-outlined text-sm">key</span>
+                        <span>Set / Reset Password</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={resending || resendCooldown > 0}
+                        onClick={handleResendVerification}
+                        className="w-full py-2 px-3 border border-outline-variant/60 bg-surface-container-lowest text-xs font-semibold text-on-surface rounded-lg hover:bg-surface-container-low transition cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      >
+                        <span className="material-symbols-outlined text-sm">verified_user</span>
+                        <span>Auto-Verify Account</span>
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -509,61 +535,63 @@ function LoginForm() {
                     </div>
                   </div>
 
-                  {/* Password Input (Login & Sign Up only) */}
-                  {mode !== "forgot_password" && (
-                    <div>
-                      <div className="flex justify-between items-center mb-unit-xs">
-                        <label className="block font-label-md text-label-md text-on-surface" htmlFor="password">
-                          {t("auth_password")}
-                        </label>
-                        {mode === "login" && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setMode("forgot_password");
-                              setError(null);
-                              setSuccess(null);
-                              setShowResendBtn(false);
-                            }}
-                            className="font-label-sm text-label-sm text-primary hover:text-primary-container transition-colors cursor-pointer"
-                          >
-                            {t("auth_forgot_password")}
-                          </button>
-                        )}
-                      </div>
-                      <div className="relative">
-                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                          <span className="material-symbols-outlined text-on-surface-variant/50 text-xl">lock</span>
-                        </div>
-                        <input
-                          className="block w-full pl-10 pr-10 py-3 border border-outline-variant rounded-lg bg-surface-container-lowest text-on-surface placeholder-on-surface-variant/50 focus:outline-none focus:ring-2 focus:ring-primary-container focus:border-transparent transition-all font-body-sm text-body-sm"
-                          id="password"
-                          name="password"
-                          placeholder={t("auth_password_placeholder")}
-                          required
-                          type={showPassword ? "text" : "password"}
-                          value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                        />
+                  {/* Password Input (Login, Sign Up & Forgot Password) */}
+                  <div>
+                    <div className="flex justify-between items-center mb-unit-xs">
+                      <label className="block font-label-md text-label-md text-on-surface" htmlFor="password">
+                        {mode === "forgot_password" ? "New Password" : t("auth_password")}
+                      </label>
+                      {mode === "login" && (
                         <button
                           type="button"
-                          onClick={() => setShowPassword(!showPassword)}
-                          aria-label={showPassword ? "Hide password" : "Show password"}
-                          className="absolute inset-y-0 right-0 pr-3 flex items-center text-on-surface-variant/60 hover:text-on-surface focus:outline-none cursor-pointer"
+                          onClick={() => {
+                            setMode("forgot_password");
+                            setError(null);
+                            setSuccess(null);
+                            setShowResendBtn(false);
+                          }}
+                          className="font-label-sm text-label-sm text-primary hover:text-primary-container transition-colors cursor-pointer"
                         >
-                          <span className="material-symbols-outlined text-xl">
-                            {showPassword ? "visibility_off" : "visibility"}
-                          </span>
+                          {t("auth_forgot_password")}
                         </button>
-                      </div>
+                      )}
                     </div>
-                  )}
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <span className="material-symbols-outlined text-on-surface-variant/50 text-xl">lock</span>
+                      </div>
+                      <input
+                        className="block w-full pl-10 pr-10 py-3 border border-outline-variant rounded-lg bg-surface-container-lowest text-on-surface placeholder-on-surface-variant/50 focus:outline-none focus:ring-2 focus:ring-primary-container focus:border-transparent transition-all font-body-sm text-body-sm"
+                        id="password"
+                        name="password"
+                        placeholder={
+                          mode === "forgot_password"
+                            ? "Enter new password (min. 6 characters)"
+                            : t("auth_password_placeholder")
+                        }
+                        required
+                        type={showPassword ? "text" : "password"}
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        aria-label={showPassword ? "Hide password" : "Show password"}
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-on-surface-variant/60 hover:text-on-surface focus:outline-none cursor-pointer"
+                      >
+                        <span className="material-symbols-outlined text-xl">
+                          {showPassword ? "visibility_off" : "visibility"}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
 
-                  {/* Confirm Password Input (Sign Up only) */}
-                  {mode === "signup" && (
+                  {/* Confirm Password Input (Sign Up & Forgot Password) */}
+                  {(mode === "signup" || mode === "forgot_password") && (
                     <div>
                       <label className="block font-label-md text-label-md text-on-surface mb-unit-xs" htmlFor="confirmPassword">
-                        {t("auth_confirm_password")}
+                        {mode === "forgot_password" ? "Confirm New Password" : t("auth_confirm_password")}
                       </label>
                       <div className="relative">
                         <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -573,7 +601,11 @@ function LoginForm() {
                           className="block w-full pl-10 pr-10 py-3 border border-outline-variant rounded-lg bg-surface-container-lowest text-on-surface placeholder-on-surface-variant/50 focus:outline-none focus:ring-2 focus:ring-primary-container focus:border-transparent transition-all font-body-sm text-body-sm"
                           id="confirmPassword"
                           name="confirmPassword"
-                          placeholder={t("auth_confirm_password_placeholder")}
+                          placeholder={
+                            mode === "forgot_password"
+                              ? "Re-enter new password"
+                              : t("auth_confirm_password_placeholder")
+                          }
                           required
                           type={showConfirmPassword ? "text" : "password"}
                           value={confirmPassword}
@@ -608,7 +640,7 @@ function LoginForm() {
                       <>
                         {mode === "login" && t("auth_sign_in_btn")}
                         {mode === "signup" && t("auth_sign_up_btn")}
-                        {mode === "forgot_password" && t("auth_send_reset_btn")}
+                        {mode === "forgot_password" && "Set Password & Sign In"}
                       </>
                     )}
                   </button>
