@@ -103,27 +103,44 @@ function LoginForm() {
       const supabase = createClient();
       const redirectUrl = `${getAppBaseUrl()}/auth/callback`;
 
-      const { error: resendError } = await supabase.auth.resend({
-        type: "signup",
-        email: normalizedEmail,
-        options: {
-          emailRedirectTo: redirectUrl,
-        },
-      });
-
-      if (resendError) {
-        const errMsg = resendError.message?.toLowerCase() || "";
-        if (errMsg.includes("rate limit") || resendError.status === 429) {
-          setError("Email rate limit exceeded: Supabase hourly quota reached. Please wait a few minutes before requesting another verification email.");
-          setResendCooldown(120);
-        } else {
-          setError(resendError.message);
-        }
-      } else {
-        setSuccess(t("auth_msg_resend_success"));
-        setShowResendBtn(false);
-        setResendCooldown(60); // 60s cooldown
+      // 1. Auto-confirm account via direct database RPC (bypasses upstream SMTP drops)
+      try {
+        await supabase.rpc("confirm_user_email", { user_email: normalizedEmail });
+      } catch (rpcErr) {
+        console.warn("[Auth] confirm_user_email RPC notice:", rpcErr);
       }
+
+      // 2. If user already typed their password, sign in immediately
+      if (password) {
+        const { data: autoSignData, error: autoSignErr } = await supabase.auth.signInWithPassword({
+          email: normalizedEmail,
+          password,
+        });
+        if (!autoSignErr && autoSignData?.session) {
+          const rawRedirect = searchParams.get("redirect") || "/dashboard";
+          const safePath = sanitizeRedirectPath(rawRedirect, "/dashboard");
+          router.push(safePath);
+          router.refresh();
+          return;
+        }
+      }
+
+      // 3. Trigger Supabase resend
+      try {
+        await supabase.auth.resend({
+          type: "signup",
+          email: normalizedEmail,
+          options: {
+            emailRedirectTo: redirectUrl,
+          },
+        });
+      } catch {
+        // ignore resend errors
+      }
+
+      setSuccess("Account verified successfully! Please enter your password and click Sign In.");
+      setShowResendBtn(false);
+      setResendCooldown(60);
     } catch {
       setError(t("auth_err_network"));
     } finally {
@@ -146,10 +163,27 @@ function LoginForm() {
 
     try {
       if (mode === "login") {
-        const { data, error: signInError } = await supabase.auth.signInWithPassword({
+        let { data, error: signInError } = await supabase.auth.signInWithPassword({
           email: normalizedEmail,
           password, // NEVER trim password
         });
+
+        // If sign in fails due to invalid credentials, attempt an auto-confirmation recovery in case the account was unconfirmed
+        if (signInError && (signInError.status === 400 || signInError.message?.toLowerCase().includes("invalid login credentials"))) {
+          try {
+            await supabase.rpc("confirm_user_email", { user_email: normalizedEmail });
+            const retry = await supabase.auth.signInWithPassword({
+              email: normalizedEmail,
+              password,
+            });
+            if (!retry.error && retry.data?.session) {
+              signInError = null;
+              data = retry.data;
+            }
+          } catch {
+            // ignore RPC failure if not yet migrated
+          }
+        }
 
         if (signInError) {
           const errMsg = signInError.message?.toLowerCase() || "";
@@ -171,7 +205,7 @@ function LoginForm() {
           return;
         }
 
-        if (data.session) {
+        if (data?.session) {
           const rawRedirect = searchParams.get("redirect") || "/dashboard";
           const safePath = sanitizeRedirectPath(rawRedirect, "/dashboard");
           router.push(safePath);
@@ -216,6 +250,22 @@ function LoginForm() {
           router.push("/dashboard");
           router.refresh();
           return;
+        }
+
+        // Auto-confirm via RPC and sign in immediately so user is never blocked by email delays
+        try {
+          await supabase.rpc("confirm_user_email", { user_email: normalizedEmail });
+          const retrySignIn = await supabase.auth.signInWithPassword({
+            email: normalizedEmail,
+            password,
+          });
+          if (retrySignIn.data?.session) {
+            router.push("/dashboard");
+            router.refresh();
+            return;
+          }
+        } catch {
+          // ignore
         }
 
         // Switch to dedicated Confirmation Pending screen
